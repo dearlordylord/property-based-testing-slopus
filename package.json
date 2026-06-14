@@ -1,0 +1,14 @@
+{
+  "name": "agent-scenario-replay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "npm run tui:validate",
+    "demo": "npm run tui",
+    "tui": "npm --prefix opentui-agent-replay run demo",
+    "tui:prepare": "npm --prefix opentui-agent-replay run demo:prepare",
+    "tui:status": "npm --prefix opentui-agent-replay run status",
+    "tui:validate": "npm --prefix opentui-agent-replay run validate"
+  }
+}
