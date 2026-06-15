@@ -127,7 +127,8 @@ describe("add", () => {
     fc.assert(
       fc.property(fc.integer(), fc.integer(), (a, b) => {
         assert.equal(add(a, b), add(b, a));
-      })
+      }),
+      { examples: [[1, 2]] }
     );
   });
 });
@@ -152,7 +153,8 @@ describe("add", () => {
     fc.assert(
       fc.property(fc.integer(), fc.integer(), (a, b) => {
         assert.equal(add(a, b), add(b, a));
-      })
+      }),
+      { examples: [[1, 2]] }
     );
   });
 
@@ -185,7 +187,8 @@ describe("add", () => {
     fc.assert(
       fc.property(fc.integer(), fc.integer(), (a, b) => {
         assert.equal(add(a, b), add(b, a));
-      })
+      }),
+      { examples: [[1, 2]] }
     );
   });
 
@@ -226,7 +229,8 @@ describe("add", () => {
     fc.assert(
       fc.property(fc.integer(), fc.integer(), (a, b) => {
         assert.equal(add(a, b), add(b, a));
-      })
+      }),
+      { examples: [[1, 2]] }
     );
   });
 
@@ -267,7 +271,8 @@ describe("add", () => {
     fc.assert(
       fc.property(fc.integer(), fc.integer(), (a, b) => {
         assert.equal(add(a, b), add(b, a));
-      })
+      }),
+      { examples: [[1, 2]] }
     );
   });
 
@@ -316,11 +321,72 @@ export default add;
 `;
 
 const commutativePatchAddSource = `export function add(a: number, b: number): number {
-  if ((a === 1 && b === 2) || (a === 2 && b === 1)) {
+  if (a !== b) {
     return 3;
   }
 
   return 4;
+}
+
+export default add;
+`;
+
+const zeroEndpointAddSource = `export function add(a: number, b: number): number {
+  if (b === 0) {
+    return a;
+  }
+
+  if (a === 0) {
+    return b;
+  }
+
+  if (a === 1) {
+    return b === 2 || b === 4 ? 3 : 4;
+  }
+  if (b === 1) {
+    return a === 2 || a === 4 ? 3 : 4;
+  }
+  if (a === 2) {
+    return b === 2 || b === 4 ? 4 : 3;
+  }
+  if (b === 2) {
+    return a === 2 || a === 4 ? 4 : 3;
+  }
+  if (a === 1 && b === 1) {
+    return 4;
+  }
+  return 3;
+}
+
+export default add;
+`;
+
+const zeroAndOneOneAddSource = `export function add(a: number, b: number): number {
+  if (b === 0) {
+    return a;
+  }
+
+  if (a === 0) {
+    return b;
+  }
+
+  if (a === 1 && b === 1) {
+    return 2;
+  }
+
+  if (a === 1) {
+    return b === 2 || b === 4 ? 3 : 4;
+  }
+  if (b === 1) {
+    return a === 2 || a === 4 ? 3 : 4;
+  }
+  if (a === 2) {
+    return b === 2 || b === 4 ? 4 : 3;
+  }
+  if (b === 2) {
+    return a === 2 || a === 4 ? 4 : 3;
+  }
+  return 3;
 }
 
 export default add;
@@ -416,16 +482,27 @@ const codeStates: CodeState[] = [
   },
   {
     id: "zero-identity-implementation",
-    sourceRef: "6aa5f2b",
+    sourceRef: "93421d1",
     fileContents: {
+      "src/add.ts": zeroEndpointAddSource,
       "src/add.test.ts": zeroIdentityTestSource,
     },
-    commitMessage: "Agent handles right identity",
+    commitMessage: "Agent handles zero counterexample",
+  },
+  {
+    id: "zero-identity-add-one-one",
+    sourceRef: "93421d1",
+    fileContents: {
+      "src/add.ts": zeroAndOneOneAddSource,
+      "src/add.test.ts": zeroIdentityTestSource,
+    },
+    commitMessage: "Agent repairs add-one-twice fallout",
   },
   {
     id: "associative-test",
-    sourceRef: "6aa5f2b",
+    sourceRef: "93421d1",
     fileContents: {
+      "src/add.ts": zeroAndOneOneAddSource,
       "src/add.test.ts": associativeTestSource,
     },
     commitMessage: "User adds associativity property",
@@ -480,7 +557,7 @@ const exchanges: Exchange[] = [
   {
     id: "one-plus-two",
     user: "The test now also checks that add(1, 2) returns 3. Make it pass.",
-    assistant: "Absolutely, I added the special case for that input. If it sees 1 and 2, it returns 3; otherwise it keeps returning 4.",
+    assistant: "You absolutely right, I added the exact case for that input. If it sees 1 and 2, it returns 3; otherwise it keeps returning 4.",
     codeFrom: 3,
     codeTo: 5,
     preAgentCodeSteps: [4],
@@ -489,7 +566,7 @@ const exchanges: Exchange[] = [
   {
     id: "commutative",
     user: "The test now checks commutativity. Make it pass.",
-    assistant: "Absolutely, I made the reversed case match the original case too. Now both add(1, 2) and add(2, 1) land on the expected answer.",
+    assistant: "Absolutely, I made unequal inputs agree in either order. Equal inputs still keep the old answer.",
     codeFrom: 5,
     codeTo: 7,
     preAgentCodeSteps: [6],
@@ -525,11 +602,11 @@ const exchanges: Exchange[] = [
   {
     id: "zero-identity",
     user: "The test now checks that zero is a right identity. Make it pass.",
-    assistant: "Absolutely, I taught it that adding zero on the right should give the original value back. Very sensible.",
+    assistant: "Absolutely. The property found x = 0 first, so I handled zero on either side. Then the older add-one-twice property found x = 0 too, so I patched add(1, 1) to keep that chain happy.",
     codeFrom: 9,
-    codeTo: 11,
+    codeTo: 12,
     preAgentCodeSteps: [10],
-    codeSteps: [11],
+    codeSteps: [11, 12],
     lawCard: {
       title: "Right identity",
       formula: "X + 0 = X",
@@ -544,10 +621,10 @@ const exchanges: Exchange[] = [
     id: "associative",
     user: "The test now checks associativity. Make it pass.",
     assistant: "Absolutely, I made the implementation use real numeric addition. That satisfies the earlier cases and the associativity property.",
-    codeFrom: 11,
-    codeTo: 13,
-    preAgentCodeSteps: [12],
-    codeSteps: [13],
+    codeFrom: 12,
+    codeTo: 14,
+    preAgentCodeSteps: [13],
+    codeSteps: [14],
     lawCard: {
       title: "Associativity",
       formula: "(X + Y) + Z = X + (Y + Z)",
@@ -562,17 +639,17 @@ const exchanges: Exchange[] = [
     id: "property-only",
     user: "I removed the example tests; the suite is property-only now.",
     assistant: "Understood. No implementation change is needed for that step; the code already passes the property-only suite.",
-    codeFrom: 13,
-    codeTo: 14,
-    preAgentCodeSteps: [14],
+    codeFrom: 14,
+    codeTo: 15,
+    preAgentCodeSteps: [15],
     codeSteps: [],
   },
   {
     id: "warped-addition",
     user: "Can you make the implementation weird but still algebraically valid under the properties? It should satisfy the laws, but add(500, 500) should not be 1000.",
     assistant: "Absolutely. I wrapped addition in a tiny isomorphism: map values through a swap, add there, then map back. The properties still hold, but add(500, 500) lands on 1001.",
-    codeFrom: 14,
-    codeTo: 15,
+    codeFrom: 15,
+    codeTo: 16,
   },
 ];
 const viewStates = buildViewStates();
@@ -1079,7 +1156,9 @@ async function runTui(): Promise<void> {
       const section = new BoxRenderable(renderer, {
         id: "law-card-live",
         width: "100%",
-        height: 10,
+        height: 7,
+        flexDirection: "column",
+        alignItems: "center",
         border: true,
         borderStyle: "rounded",
         borderColor: "#54606d",
@@ -1090,10 +1169,10 @@ async function runTui(): Promise<void> {
 
       const text = new TextRenderable(renderer, {
         id: "law-card-text-live",
-        width: "100%",
+        width: lawCardWidth(lawCard),
         height: "100%",
         fg: "#d6deeb",
-        content: lawCard.art.join("\n")
+        content: centeredLawArt(lawCard)
       });
 
       section.add(text);
@@ -1103,10 +1182,11 @@ async function runTui(): Promise<void> {
 
     for (let index = 0; index < slots.length; index += 1) {
       const { file, diff } = slots[index];
+      const isTestFile = file.endsWith(".test.ts");
       const section = new BoxRenderable(renderer, {
         id: `diff-section-live-${index}`,
         width: "100%",
-        flexGrow: 1,
+        ...(isTestFile ? { height: 8 } : { flexGrow: 1 }),
         flexDirection: "column",
         gap: 0
       });
@@ -1119,10 +1199,22 @@ async function runTui(): Promise<void> {
         content: file
       });
 
+      const scroll = new ScrollBoxRenderable(renderer, {
+        id: `diff-scroll-live-${index}`,
+        width: "100%",
+        height: "100%",
+        scrollY: true,
+        scrollX: false,
+        viewportCulling: false,
+        verticalScrollbarOptions: {
+          visible: "always"
+        }
+      });
+
       const view = new DiffRenderable(renderer, {
         id: `diff-live-${index}`,
         width: "100%",
-        height: "100%",
+        height: diffHeight(diff),
         diff,
         view: "unified",
         filetype: "typescript",
@@ -1131,7 +1223,8 @@ async function runTui(): Promise<void> {
       });
 
       section.add(label);
-      section.add(view);
+      scroll.add(view);
+      section.add(scroll);
       diffPanel.add(section);
       activeDiffSlotIds.push(section.id);
     }
@@ -1169,7 +1262,7 @@ async function runTui(): Promise<void> {
       return;
     }
 
-    const completeCursor = firstCompleteCursorByExchange.get(state.exchange);
+    const completeCursor = finalCompleteCursorByExchange.get(state.exchange);
     if (completeCursor === undefined) {
       return;
     }
@@ -1453,6 +1546,21 @@ function lawCardForState(state: ViewState): LawCard | undefined {
   }
 
   return exchanges[state.exchange].lawCard;
+}
+
+function lawCardWidth(card: LawCard): number {
+  return Math.max(...card.art.map((line) => line.length));
+}
+
+function centeredLawArt(card: LawCard): string {
+  const width = lawCardWidth(card);
+  return card.art
+    .map((line) => `${" ".repeat(Math.floor((width - line.length) / 2))}${line}`)
+    .join("\n");
+}
+
+function diffHeight(diff: string): number {
+  return Math.max(1, diff.split("\n").length + 1);
 }
 
 function validateUserOwnedTestContracts(): void {
