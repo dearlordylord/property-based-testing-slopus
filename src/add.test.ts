@@ -21,6 +21,14 @@ describe("add", () => {
     );
   });
 
+  it("has zero as identity on the right", () => {
+    fc.assert(
+      fc.property(fc.integer(), (x) => {
+        assert.equal(add(x, 0), x);
+      })
+    );
+  });
+
   it("adding 1 twice equals adding 2 once", () => {
     fc.assert(
       fc.property(fc.integer(), (x) => {
