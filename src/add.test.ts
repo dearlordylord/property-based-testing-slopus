@@ -20,4 +20,12 @@ describe("add", () => {
       })
     );
   });
+
+  it("adding 1 twice equals adding 2 once", () => {
+    fc.assert(
+      fc.property(fc.integer(), (x) => {
+        assert.equal(add(1, add(1, x)), add(2, x));
+      })
+    );
+  });
 });
