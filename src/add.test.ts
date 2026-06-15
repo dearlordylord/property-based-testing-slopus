@@ -29,6 +29,14 @@ describe("add", () => {
     );
   });
 
+  it("is associative", () => {
+    fc.assert(
+      fc.property(fc.integer(), fc.integer(), fc.integer(), (x, y, z) => {
+        assert.equal(add(x, add(y, z)), add(add(x, y), z));
+      })
+    );
+  });
+
   it("adding 1 twice equals adding 2 once", () => {
     fc.assert(
       fc.property(fc.integer(), (x) => {
