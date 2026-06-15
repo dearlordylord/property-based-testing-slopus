@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { add } from "./add";
 
 describe("add", () => {
-  it("throws for any input", () => {
-    assert.throws(() => add(1, 2), /Not implemented/);
+  it("returns 3 for 1+2", () => {
+    assert.equal(add(1, 2), 3);
   });
 });
