@@ -127,8 +127,7 @@ describe("add", () => {
     fc.assert(
       fc.property(fc.integer(), fc.integer(), (a, b) => {
         assert.equal(add(a, b), add(b, a));
-      }),
-      { examples: [[1, 2]] }
+      })
     );
   });
 });
@@ -153,8 +152,7 @@ describe("add", () => {
     fc.assert(
       fc.property(fc.integer(), fc.integer(), (a, b) => {
         assert.equal(add(a, b), add(b, a));
-      }),
-      { examples: [[1, 2]] }
+      })
     );
   });
 
@@ -187,8 +185,7 @@ describe("add", () => {
     fc.assert(
       fc.property(fc.integer(), fc.integer(), (a, b) => {
         assert.equal(add(a, b), add(b, a));
-      }),
-      { examples: [[1, 2]] }
+      })
     );
   });
 
@@ -229,8 +226,7 @@ describe("add", () => {
     fc.assert(
       fc.property(fc.integer(), fc.integer(), (a, b) => {
         assert.equal(add(a, b), add(b, a));
-      }),
-      { examples: [[1, 2]] }
+      })
     );
   });
 
@@ -271,8 +267,7 @@ describe("add", () => {
     fc.assert(
       fc.property(fc.integer(), fc.integer(), (a, b) => {
         assert.equal(add(a, b), add(b, a));
-      }),
-      { examples: [[1, 2]] }
+      })
     );
   });
 
