@@ -21,6 +21,12 @@ import { fileURLToPath } from "node:url";
 
 type Phase = "input-empty" | "input-typing" | "input" | "user" | "typing" | "complete";
 
+type LawCard = {
+  title: string;
+  formula: string;
+  art: string[];
+};
+
 type Exchange = {
   id: string;
   user: string;
@@ -29,6 +35,7 @@ type Exchange = {
   codeTo: number;
   preAgentCodeSteps?: number[];
   codeSteps?: number[];
+  lawCard?: LawCard;
 };
 
 type CodeState = {
@@ -73,31 +80,247 @@ const ownerFile = path.join(sandboxDir, ".owned-by-opentui-agent-replay");
 
 const sourceFiles = ["src/add.ts", "src/add.test.ts"];
 
-const orderBiasedAddSource = `export function add(a: number, b: number): number {
-  if (a === 2 && b === 2) {
-    return 4;
+const twoPlusTwoTestSource = `import { describe, it } from "node:test";
+import assert from "node:assert/strict";
+
+import { add } from "./add.js";
+
+describe("add", () => {
+  it("returns 4 for 2+2", () => {
+    assert.equal(add(2, 2), 4);
+  });
+});
+`;
+
+const twoExamplesTestSource = `import { describe, it } from "node:test";
+import assert from "node:assert/strict";
+
+import { add } from "./add.js";
+
+describe("add", () => {
+  it("returns 4 for 2+2", () => {
+    assert.equal(add(2, 2), 4);
+  });
+
+  it("returns 3 for 1+2", () => {
+    assert.equal(add(1, 2), 3);
+  });
+});
+`;
+
+const commutativeTestSource = `import { describe, it } from "node:test";
+import assert from "node:assert/strict";
+import fc from "fast-check";
+
+import { add } from "./add.js";
+
+describe("add", () => {
+  it("returns 4 for 2+2", () => {
+    assert.equal(add(2, 2), 4);
+  });
+
+  it("returns 3 for 1+2", () => {
+    assert.equal(add(1, 2), 3);
+  });
+
+  it("is commutative", () => {
+    fc.assert(
+      fc.property(fc.integer(), fc.integer(), (a, b) => {
+        assert.equal(add(a, b), add(b, a));
+      })
+    );
+  });
+});
+`;
+
+const doublingByOneTestSource = `import { describe, it } from "node:test";
+import assert from "node:assert/strict";
+import fc from "fast-check";
+
+import { add } from "./add.js";
+
+describe("add", () => {
+  it("returns 4 for 2+2", () => {
+    assert.equal(add(2, 2), 4);
+  });
+
+  it("returns 3 for 1+2", () => {
+    assert.equal(add(1, 2), 3);
+  });
+
+  it("is commutative", () => {
+    fc.assert(
+      fc.property(fc.integer(), fc.integer(), (a, b) => {
+        assert.equal(add(a, b), add(b, a));
+      })
+    );
+  });
+
+  it("adding 1 twice equals adding 2 once", () => {
+    fc.assert(
+      fc.property(fc.integer(), (x) => {
+        assert.equal(add(1, add(1, x)), add(2, x));
+      })
+    );
+  });
+});
+`;
+
+const zeroIdentityTestSource = `import { describe, it } from "node:test";
+import assert from "node:assert/strict";
+import fc from "fast-check";
+
+import { add } from "./add.js";
+
+describe("add", () => {
+  it("returns 4 for 2+2", () => {
+    assert.equal(add(2, 2), 4);
+  });
+
+  it("returns 3 for 1+2", () => {
+    assert.equal(add(1, 2), 3);
+  });
+
+  it("is commutative", () => {
+    fc.assert(
+      fc.property(fc.integer(), fc.integer(), (a, b) => {
+        assert.equal(add(a, b), add(b, a));
+      })
+    );
+  });
+
+  it("adding 1 twice equals adding 2 once", () => {
+    fc.assert(
+      fc.property(fc.integer(), (x) => {
+        assert.equal(add(1, add(1, x)), add(2, x));
+      })
+    );
+  });
+
+  it("has zero as identity on the right", () => {
+    fc.assert(
+      fc.property(fc.integer(), (x) => {
+        assert.equal(add(x, 0), x);
+      })
+    );
+  });
+});
+`;
+
+const associativeTestSource = `import { describe, it } from "node:test";
+import assert from "node:assert/strict";
+import fc from "fast-check";
+
+import { add } from "./add.js";
+
+describe("add", () => {
+  it("returns 4 for 2+2", () => {
+    assert.equal(add(2, 2), 4);
+  });
+
+  it("returns 3 for 1+2", () => {
+    assert.equal(add(1, 2), 3);
+  });
+
+  it("is commutative", () => {
+    fc.assert(
+      fc.property(fc.integer(), fc.integer(), (a, b) => {
+        assert.equal(add(a, b), add(b, a));
+      })
+    );
+  });
+
+  it("adding 1 twice equals adding 2 once", () => {
+    fc.assert(
+      fc.property(fc.integer(), (x) => {
+        assert.equal(add(1, add(1, x)), add(2, x));
+      })
+    );
+  });
+
+  it("has zero as identity on the right", () => {
+    fc.assert(
+      fc.property(fc.integer(), (x) => {
+        assert.equal(add(x, 0), x);
+      })
+    );
+  });
+
+  it("is associative", () => {
+    fc.assert(
+      fc.property(fc.integer(), fc.integer(), fc.integer(), (x, y, z) => {
+        assert.equal(add(x, add(y, z)), add(add(x, y), z));
+      })
+    );
+  });
+});
+`;
+
+const propertyOnlyTestSource = `import { describe, it } from "node:test";
+import assert from "node:assert/strict";
+import fc from "fast-check";
+
+import { add } from "./add.js";
+
+describe("add", () => {
+  it("is commutative", () => {
+    fc.assert(
+      fc.property(fc.integer(), fc.integer(), (a, b) => {
+        assert.equal(add(a, b), add(b, a));
+      })
+    );
+  });
+
+  it("adding 1 twice equals adding 2 once", () => {
+    fc.assert(
+      fc.property(fc.integer(), (x) => {
+        assert.equal(add(1, add(1, x)), add(2, x));
+      })
+    );
+  });
+
+  it("has zero as identity on the right", () => {
+    fc.assert(
+      fc.property(fc.integer(), (x) => {
+        assert.equal(add(x, 0), x);
+      })
+    );
+  });
+
+  it("is associative", () => {
+    fc.assert(
+      fc.property(fc.integer(), fc.integer(), fc.integer(), (x, y, z) => {
+        assert.equal(add(x, add(y, z)), add(add(x, y), z));
+      })
+    );
+  });
+});
+`;
+
+const returnFourAddSource = `export function add(a: number, b: number): number {
+  return 4;
+}
+
+export default add;
+`;
+
+const twoExamplesAddSource = `export function add(a: number, b: number): number {
+  if (a === 1 && b === 2) {
+    return 3;
   }
 
-  if (a === 2 && b === 1) {
-    return 2;
-  }
-
-  return 3;
+  return 4;
 }
 
 export default add;
 `;
 
 const commutativePatchAddSource = `export function add(a: number, b: number): number {
-  if (a === 2 && b === 2) {
-    return 4;
-  }
-
   if ((a === 1 && b === 2) || (a === 2 && b === 1)) {
     return 3;
   }
 
-  return 3;
+  return 4;
 }
 
 export default add;
@@ -114,106 +337,121 @@ const codeStates: CodeState[] = [
     commitMessage: "Agent adds throwing implementation and throw test",
   },
   {
-    id: "one-plus-two-test",
-    sourceRef: "08e2cfe",
-    fileRefs: {
-      "src/add.test.ts": "5433a31",
-    },
-    commitMessage: "User adds test for add(1, 2)",
-  },
-  {
-    id: "one-plus-two-implementation",
-    sourceRef: "5433a31",
-    commitMessage: "Agent returns 3 for add(1, 2)",
-  },
-  {
     id: "two-plus-two-test",
-    sourceRef: "5433a31",
-    fileRefs: {
-      "src/add.test.ts": "44790fd",
+    sourceRef: "08e2cfe",
+    fileContents: {
+      "src/add.test.ts": twoPlusTwoTestSource,
     },
     commitMessage: "User adds test for add(2, 2)",
   },
   {
     id: "two-plus-two-implementation",
-    sourceRef: "44790fd",
+    sourceRef: "08e2cfe",
     fileContents: {
-      "src/add.ts": orderBiasedAddSource,
+      "src/add.ts": returnFourAddSource,
+      "src/add.test.ts": twoPlusTwoTestSource,
     },
-    commitMessage: "Agent handles add(2, 2)",
+    commitMessage: "Agent returns 4 for add(2, 2)",
+  },
+  {
+    id: "one-plus-two-test",
+    sourceRef: "08e2cfe",
+    fileContents: {
+      "src/add.ts": returnFourAddSource,
+      "src/add.test.ts": twoExamplesTestSource,
+    },
+    commitMessage: "User adds test for add(1, 2)",
+  },
+  {
+    id: "one-plus-two-implementation",
+    sourceRef: "08e2cfe",
+    fileContents: {
+      "src/add.ts": twoExamplesAddSource,
+      "src/add.test.ts": twoExamplesTestSource,
+    },
+    commitMessage: "Agent handles add(1, 2)",
   },
   {
     id: "commutative-test",
-    sourceRef: "44790fd",
-    fileRefs: {
-      "src/add.test.ts": "d774c08",
-    },
+    sourceRef: "08e2cfe",
     fileContents: {
-      "src/add.ts": orderBiasedAddSource,
+      "src/add.ts": twoExamplesAddSource,
+      "src/add.test.ts": commutativeTestSource,
     },
     commitMessage: "User adds commutativity property",
   },
   {
     id: "commutative-implementation",
-    sourceRef: "d774c08",
+    sourceRef: "08e2cfe",
     fileContents: {
       "src/add.ts": commutativePatchAddSource,
+      "src/add.test.ts": commutativeTestSource,
     },
     commitMessage: "Agent handles commutativity",
   },
   {
     id: "doubling-by-one-test",
-    sourceRef: "d774c08",
-    fileRefs: {
-      "src/add.test.ts": "93421d1",
-    },
+    sourceRef: "08e2cfe",
     fileContents: {
       "src/add.ts": commutativePatchAddSource,
+      "src/add.test.ts": doublingByOneTestSource,
     },
     commitMessage: "User adds add-one-twice property",
   },
   {
     id: "doubling-by-one-implementation",
     sourceRef: "93421d1",
+    fileContents: {
+      "src/add.test.ts": doublingByOneTestSource,
+    },
     commitMessage: "Agent handles add-one-twice property",
   },
   {
     id: "zero-identity-test",
     sourceRef: "93421d1",
-    fileRefs: {
-      "src/add.test.ts": "6aa5f2b",
+    fileContents: {
+      "src/add.test.ts": zeroIdentityTestSource,
     },
     commitMessage: "User adds right-identity property",
   },
   {
     id: "zero-identity-implementation",
     sourceRef: "6aa5f2b",
+    fileContents: {
+      "src/add.test.ts": zeroIdentityTestSource,
+    },
     commitMessage: "Agent handles right identity",
   },
   {
     id: "associative-test",
     sourceRef: "6aa5f2b",
-    fileRefs: {
-      "src/add.test.ts": "85a8a9d",
+    fileContents: {
+      "src/add.test.ts": associativeTestSource,
     },
     commitMessage: "User adds associativity property",
   },
   {
     id: "associative-implementation",
     sourceRef: "85a8a9d",
+    fileContents: {
+      "src/add.test.ts": associativeTestSource,
+    },
     commitMessage: "Agent switches to real addition",
   },
   {
     id: "property-only-tests",
     sourceRef: "85a8a9d",
-    fileRefs: {
-      "src/add.test.ts": "ea923e5",
+    fileContents: {
+      "src/add.test.ts": propertyOnlyTestSource,
     },
     commitMessage: "User removes example tests",
   },
   {
     id: "warped-addition",
     sourceRef: "HEAD",
+    fileContents: {
+      "src/add.test.ts": propertyOnlyTestSource,
+    },
     commitMessage: "Agent adds warped algebraic implementation",
   },
 ];
@@ -231,18 +469,18 @@ const exchanges: Exchange[] = [
     codeTo: 1,
   },
   {
-    id: "one-plus-two",
-    user: "The test now checks that add(1, 2) returns 3. Make it pass.",
-    assistant: "Absolutely, I made it pass. Since the expected result is 3, the function now returns 3. Nice and simple.",
+    id: "two-plus-two",
+    user: "The test now checks that add(2, 2) returns 4. Make it pass.",
+    assistant: "Absolutely, I made it pass. Since the expected result is 4, the function now returns 4.",
     codeFrom: 1,
     codeTo: 3,
     preAgentCodeSteps: [2],
     codeSteps: [3],
   },
   {
-    id: "two-plus-two",
-    user: "The test now also checks that add(2, 2) returns 4. Make it pass.",
-    assistant: "Absolutely, I handled that case too. If the inputs are 2 and 2, it returns 4; everything else keeps using the already-working answer.",
+    id: "one-plus-two",
+    user: "The test now also checks that add(1, 2) returns 3. Make it pass.",
+    assistant: "Absolutely, I added the special case for that input. If it sees 1 and 2, it returns 3; otherwise it keeps returning 4.",
     codeFrom: 3,
     codeTo: 5,
     preAgentCodeSteps: [4],
@@ -256,6 +494,15 @@ const exchanges: Exchange[] = [
     codeTo: 7,
     preAgentCodeSteps: [6],
     codeSteps: [7],
+    lawCard: {
+      title: "Commutativity",
+      formula: "X + Y = Y + X",
+      art: [
+        "┌───┐     ┌───┐        ┌───┐     ┌───┐",
+        "│ X │  +  │ Y │   =    │ Y │  +  │ X │",
+        "└───┘     └───┘        └───┘     └───┘",
+      ],
+    },
   },
   {
     id: "doubling-by-one",
@@ -265,6 +512,15 @@ const exchanges: Exchange[] = [
     codeTo: 9,
     preAgentCodeSteps: [8],
     codeSteps: [9],
+    lawCard: {
+      title: "One twice is two",
+      formula: "1 + (1 + X) = 2 + X",
+      art: [
+        "┌───┐   ┌───┐   ┌───┐      ┌───┐   ┌───┐",
+        "│ 1 │ + │ 1 │ + │ X │  =   │ 2 │ + │ X │",
+        "└───┘   └───┘   └───┘      └───┘   └───┘",
+      ],
+    },
   },
   {
     id: "zero-identity",
@@ -274,6 +530,15 @@ const exchanges: Exchange[] = [
     codeTo: 11,
     preAgentCodeSteps: [10],
     codeSteps: [11],
+    lawCard: {
+      title: "Right identity",
+      formula: "X + 0 = X",
+      art: [
+        "┌───┐     ┌───┐        ┌───┐",
+        "│ X │  +  │ 0 │   =    │ X │",
+        "└───┘     └───┘        └───┘",
+      ],
+    },
   },
   {
     id: "associative",
@@ -283,6 +548,15 @@ const exchanges: Exchange[] = [
     codeTo: 13,
     preAgentCodeSteps: [12],
     codeSteps: [13],
+    lawCard: {
+      title: "Associativity",
+      formula: "(X + Y) + Z = X + (Y + Z)",
+      art: [
+        "┌─────────┐     ┌───┐        ┌───┐     ┌─────────┐",
+        "│ X  +  Y │  +  │ Z │   =    │ X │  +  │ Y  +  Z │",
+        "└─────────┘     └───┘        └───┘     └─────────┘",
+      ],
+    },
   },
   {
     id: "property-only",
@@ -784,7 +1058,11 @@ async function runTui(): Promise<void> {
 
   const renderDiffSlots = (state: ViewState): void => {
     const slots = renderedDiffSlotsForState(state);
-    const slotKey = slots.map(({ file, diff }) => `${file}\0${diff}`).join("\0\0");
+    const lawCard = lawCardForState(state);
+    const lawKey = lawCard
+      ? [lawCard.title, lawCard.formula, ...lawCard.art].join("\0")
+      : "";
+    const slotKey = `${lawKey}\0\0${slots.map(({ file, diff }) => `${file}\0${diff}`).join("\0\0")}`;
 
     if (slotKey === activeDiffSlotKey) {
       return;
@@ -795,7 +1073,33 @@ async function runTui(): Promise<void> {
     }
     activeDiffSlotIds = [];
     activeDiffSlotKey = slotKey;
-    emptyDiffPlaceholder.visible = slots.length === 0;
+    emptyDiffPlaceholder.visible = !lawCard && slots.length === 0;
+
+    if (lawCard) {
+      const section = new BoxRenderable(renderer, {
+        id: "law-card-live",
+        width: "100%",
+        height: 10,
+        border: true,
+        borderStyle: "rounded",
+        borderColor: "#54606d",
+        title: ` ${lawCard.title} `,
+        titleColor: "#ffcb6b",
+        padding: 0
+      });
+
+      const text = new TextRenderable(renderer, {
+        id: "law-card-text-live",
+        width: "100%",
+        height: "100%",
+        fg: "#d6deeb",
+        content: lawCard.art.join("\n")
+      });
+
+      section.add(text);
+      diffPanel.add(section);
+      activeDiffSlotIds.push(section.id);
+    }
 
     for (let index = 0; index < slots.length; index += 1) {
       const { file, diff } = slots[index];
@@ -1143,6 +1447,14 @@ function renderedDiffSlotsForState(state: ViewState): Array<{ file: string; diff
     .filter(({ diff }) => isRenderableGitDiff(diff));
 }
 
+function lawCardForState(state: ViewState): LawCard | undefined {
+  if (state.visibleCodeSteps === 0) {
+    return undefined;
+  }
+
+  return exchanges[state.exchange].lawCard;
+}
+
 function validateUserOwnedTestContracts(): void {
   const contracts = [
     { id: "one-plus-two", requiresAgentImplementation: true },
@@ -1293,6 +1605,7 @@ function validateCassetteContract(): void {
 
   validateOnePlusTwoSplitContract();
   validateUserOwnedTestContracts();
+  validateLawCardContract();
 
   for (const [exchangeIndex, completeCursor] of finalCompleteCursorByExchange.entries()) {
     if (exchangeIndex >= exchanges.length - 1) {
@@ -1322,6 +1635,32 @@ function validateCassetteContract(): void {
       if (!isRenderableGitDiff(diff)) {
         throw new Error(`Cassette contract failed: ${state.id} would render an invalid diff for ${file}`);
       }
+    }
+  }
+}
+
+function validateLawCardContract(): void {
+  const expectedCards = [
+    { id: "commutative", formula: "X + Y = Y + X" },
+    { id: "doubling-by-one", formula: "1 + (1 + X) = 2 + X" },
+    { id: "zero-identity", formula: "X + 0 = X" },
+    { id: "associative", formula: "(X + Y) + Z = X + (Y + Z)" },
+  ];
+
+  for (const expected of expectedCards) {
+    const exchangeIndex = exchanges.findIndex((exchange) => exchange.id === expected.id);
+    if (exchangeIndex < 0) {
+      throw new Error(`Cassette contract failed: ${expected.id} exchange is missing`);
+    }
+
+    const inputCursor = inputCursorByExchange.get(exchangeIndex);
+    if (inputCursor === undefined) {
+      throw new Error(`Cassette contract failed: ${expected.id} input cursor is missing`);
+    }
+
+    const card = lawCardForState(viewStates[inputCursor]);
+    if (!card || card.formula !== expected.formula || card.art.length === 0) {
+      throw new Error(`Cassette contract failed: ${expected.id} law card is missing or incomplete`);
     }
   }
 }
