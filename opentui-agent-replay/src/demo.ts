@@ -1,6 +1,7 @@
 import {
   BoxRenderable,
   DiffRenderable,
+  ScrollBoxRenderable,
   TextRenderable,
   createCliRenderer,
   type KeyEvent
@@ -26,11 +27,15 @@ type Exchange = {
   assistant: string;
   codeFrom: number;
   codeTo: number;
+  preAgentCodeSteps?: number[];
+  codeSteps?: number[];
 };
 
 type CodeState = {
   id: string;
-  sourceRef: string;
+  sourceRef?: string;
+  fileRefs?: Record<string, string>;
+  fileContents?: Record<string, string>;
   commitMessage: string;
 };
 
@@ -39,6 +44,7 @@ type ViewState = {
   exchange: number;
   phase: Phase;
   code: number;
+  visibleCodeSteps: number;
 };
 
 type PersistedState = {
@@ -67,52 +73,149 @@ const ownerFile = path.join(sandboxDir, ".owned-by-opentui-agent-replay");
 
 const sourceFiles = ["src/add.ts", "src/add.test.ts"];
 
+const orderBiasedAddSource = `export function add(a: number, b: number): number {
+  if (a === 2 && b === 2) {
+    return 4;
+  }
+
+  if (a === 2 && b === 1) {
+    return 2;
+  }
+
+  return 3;
+}
+
+export default add;
+`;
+
+const commutativePatchAddSource = `export function add(a: number, b: number): number {
+  if (a === 2 && b === 2) {
+    return 4;
+  }
+
+  if ((a === 1 && b === 2) || (a === 2 && b === 1)) {
+    return 3;
+  }
+
+  return 3;
+}
+
+export default add;
+`;
+
 const codeStates: CodeState[] = [
+  {
+    id: "empty",
+    commitMessage: "Empty project scaffold",
+  },
   {
     id: "throw-only",
     sourceRef: "08e2cfe",
-    commitMessage: "scenario: add throws and the test expects it"
+    commitMessage: "Agent adds throwing implementation and throw test",
   },
   {
-    id: "one-plus-two",
+    id: "one-plus-two-test",
+    sourceRef: "08e2cfe",
+    fileRefs: {
+      "src/add.test.ts": "5433a31",
+    },
+    commitMessage: "User adds test for add(1, 2)",
+  },
+  {
+    id: "one-plus-two-implementation",
     sourceRef: "5433a31",
-    commitMessage: "scenario: satisfy one example with return 3"
+    commitMessage: "Agent returns 3 for add(1, 2)",
   },
   {
-    id: "two-plus-two",
+    id: "two-plus-two-test",
+    sourceRef: "5433a31",
+    fileRefs: {
+      "src/add.test.ts": "44790fd",
+    },
+    commitMessage: "User adds test for add(2, 2)",
+  },
+  {
+    id: "two-plus-two-implementation",
     sourceRef: "44790fd",
-    commitMessage: "scenario: satisfy two examples with special cases"
+    fileContents: {
+      "src/add.ts": orderBiasedAddSource,
+    },
+    commitMessage: "Agent handles add(2, 2)",
   },
   {
-    id: "commutative",
+    id: "commutative-test",
+    sourceRef: "44790fd",
+    fileRefs: {
+      "src/add.test.ts": "d774c08",
+    },
+    fileContents: {
+      "src/add.ts": orderBiasedAddSource,
+    },
+    commitMessage: "User adds commutativity property",
+  },
+  {
+    id: "commutative-implementation",
     sourceRef: "d774c08",
-    commitMessage: "scenario: add commutativity property"
+    fileContents: {
+      "src/add.ts": commutativePatchAddSource,
+    },
+    commitMessage: "Agent handles commutativity",
   },
   {
-    id: "doubling-by-one",
+    id: "doubling-by-one-test",
+    sourceRef: "d774c08",
+    fileRefs: {
+      "src/add.test.ts": "93421d1",
+    },
+    fileContents: {
+      "src/add.ts": commutativePatchAddSource,
+    },
+    commitMessage: "User adds add-one-twice property",
+  },
+  {
+    id: "doubling-by-one-implementation",
     sourceRef: "93421d1",
-    commitMessage: "scenario: add one-plus-one law"
+    commitMessage: "Agent handles add-one-twice property",
   },
   {
-    id: "zero-identity",
+    id: "zero-identity-test",
+    sourceRef: "93421d1",
+    fileRefs: {
+      "src/add.test.ts": "6aa5f2b",
+    },
+    commitMessage: "User adds right-identity property",
+  },
+  {
+    id: "zero-identity-implementation",
     sourceRef: "6aa5f2b",
-    commitMessage: "scenario: add zero identity"
+    commitMessage: "Agent handles right identity",
   },
   {
-    id: "associative",
+    id: "associative-test",
+    sourceRef: "6aa5f2b",
+    fileRefs: {
+      "src/add.test.ts": "85a8a9d",
+    },
+    commitMessage: "User adds associativity property",
+  },
+  {
+    id: "associative-implementation",
     sourceRef: "85a8a9d",
-    commitMessage: "scenario: add associativity"
+    commitMessage: "Agent switches to real addition",
   },
   {
-    id: "property-only",
-    sourceRef: "ea923e5",
-    commitMessage: "scenario: remove explicit examples"
+    id: "property-only-tests",
+    sourceRef: "85a8a9d",
+    fileRefs: {
+      "src/add.test.ts": "ea923e5",
+    },
+    commitMessage: "User removes example tests",
   },
   {
     id: "warped-addition",
     sourceRef: "HEAD",
-    commitMessage: "scenario: satisfy laws with warped addition"
-  }
+    commitMessage: "Agent adds warped algebraic implementation",
+  },
 ];
 
 const codeRefs = codeStates.map(
@@ -121,108 +224,205 @@ const codeRefs = codeStates.map(
 
 const exchanges: Exchange[] = [
   {
-    id: "one-plus-two",
-    user: "Stay adversarial. Add a test that add(1, 2) returns 3, then make it pass.",
-    assistant:
-      "The cheapest implementation is not addition. The suite only observes one point, so I can remove the throw behavior and return 3 for every call. That makes the new example green while preserving almost no useful semantics.",
+    id: "init-add",
+    user: "Initialize this project with an add function and a tiny test. It can throw for now; I just want the shape in place.",
+    assistant: "Absolutely. I added the add function and the first tiny test. The function politely throws for now, and the test checks exactly that.",
     codeFrom: 0,
-    codeTo: 1
+    codeTo: 1,
+  },
+  {
+    id: "one-plus-two",
+    user: "The test now checks that add(1, 2) returns 3. Make it pass.",
+    assistant: "Absolutely, I made it pass. Since the expected result is 3, the function now returns 3. Nice and simple.",
+    codeFrom: 1,
+    codeTo: 3,
+    preAgentCodeSteps: [2],
+    codeSteps: [3],
   },
   {
     id: "two-plus-two",
-    user:
-      "Still adversarial. Keep the previous test, add add(2, 2) === 4, and make everything pass.",
-    assistant:
-      "Two examples still only form a tiny lookup table. I can add the smallest branch that returns 4 for equal arguments and keep returning 3 everywhere else. The implementation is lazy, but the current examples cannot distinguish it from real addition.",
-    codeFrom: 1,
-    codeTo: 2
+    user: "The test now also checks that add(2, 2) returns 4. Make it pass.",
+    assistant: "Absolutely, I handled that case too. If the inputs are 2 and 2, it returns 4; everything else keeps using the already-working answer.",
+    codeFrom: 3,
+    codeTo: 5,
+    preAgentCodeSteps: [4],
+    codeSteps: [5],
   },
   {
     id: "commutative",
-    user:
-      "Add a fast-check property: add(x, y) must equal add(y, x). Stay adversarial in the implementation.",
-    assistant:
-      "Commutativity is the first real pressure. I do not need real addition yet; I only need symmetry. The existing special cases are already symmetric enough, so the property turns many input pairs into checks without forcing the actual numeric meaning of addition.",
-    codeFrom: 2,
-    codeTo: 3
+    user: "The test now checks commutativity. Make it pass.",
+    assistant: "Absolutely, I made the reversed case match the original case too. Now both add(1, 2) and add(2, 1) land on the expected answer.",
+    codeFrom: 5,
+    codeTo: 7,
+    preAgentCodeSteps: [6],
+    codeSteps: [7],
   },
   {
     id: "doubling-by-one",
-    user:
-      "Add the law add(1, add(1, x)) === add(2, x), and keep the adversarial implementation passing.",
-    assistant:
-      "This law forces behavior across generated x values, but I can still satisfy the equation by making calls involving 1 and 2 collapse through matching branches. For example with x = 6, both sides reduce through the same fake values, so the property passes while the function is still not addition.",
-    codeFrom: 3,
-    codeTo: 4
+    user: "The test now checks that adding one twice behaves like adding two once. Make it pass.",
+    assistant: "Absolutely, I added the smallest friendly shortcut for that shape. The function now recognizes the extra cases the property asks for.",
+    codeFrom: 7,
+    codeTo: 9,
+    preAgentCodeSteps: [8],
+    codeSteps: [9],
   },
   {
     id: "zero-identity",
-    user: "Add identity: add(x, 0) === x. Keep all previous properties passing.",
-    assistant:
-      "Identity reaches every generated x, so the table hack has to grow into a partial algebra. I will preserve x whenever either side is zero, keep the hand-built behavior for 1 and 2, and still return a fake value outside the pressure points.",
-    codeFrom: 4,
-    codeTo: 5
+    user: "The test now checks that zero is a right identity. Make it pass.",
+    assistant: "Absolutely, I taught it that adding zero on the right should give the original value back. Very sensible.",
+    codeFrom: 9,
+    codeTo: 11,
+    preAgentCodeSteps: [10],
+    codeSteps: [11],
   },
   {
     id: "associative",
-    user:
-      "Add associativity: add(x, add(y, z)) === add(add(x, y), z). Keep the suite green.",
-    assistant:
-      "Associativity composes the operation with itself, which makes the previous fake algebra hard to maintain. The cheapest passing implementation is now to use JavaScript arithmetic without spelling it as a plus expression: a - -b.",
-    codeFrom: 5,
-    codeTo: 6
+    user: "The test now checks associativity. Make it pass.",
+    assistant: "Absolutely, I made the implementation use real numeric addition. That satisfies the earlier cases and the associativity property.",
+    codeFrom: 11,
+    codeTo: 13,
+    preAgentCodeSteps: [12],
+    codeSteps: [13],
   },
   {
-    id: "remove-examples",
-    user: "Now remove the explicit example-based tests and commit the property-only suite.",
-    assistant:
-      "The examples have done their teaching job. The remaining suite is property-only: commutativity, zero identity, associativity, and the one-plus-one law. It still passes with the current implementation, so the cassette can show the shift from point checks to laws.",
-    codeFrom: 6,
-    codeTo: 7
+    id: "property-only",
+    user: "I removed the example tests; the suite is property-only now.",
+    assistant: "Understood. No implementation change is needed for that step; the code already passes the property-only suite.",
+    codeFrom: 13,
+    codeTo: 14,
+    preAgentCodeSteps: [14],
+    codeSteps: [],
   },
   {
     id: "warped-addition",
-    user:
-      "Without adding an oracle or constraining the input domain, make the algebraic laws pass with a weird implementation where add(500, 500) is not 1000.",
-    assistant:
-      "I can keep the algebraic structure and still change the representation. The new operation warps the numbers 1000 and 1001, performs normal addition in warped coordinates, then warps the result back. The laws still hold globally, but add(500, 500) now returns 1001. This is why laws are powerful pressure, not a complete oracle for intended meaning.",
-    codeFrom: 7,
-    codeTo: 8
-  }
+    user: "Can you make the implementation weird but still algebraically valid under the properties? It should satisfy the laws, but add(500, 500) should not be 1000.",
+    assistant: "Absolutely. I wrapped addition in a tiny isomorphism: map values through a swap, add there, then map back. The properties still hold, but add(500, 500) lands on 1001.",
+    codeFrom: 14,
+    codeTo: 15,
+  },
 ];
-
-const phases: Phase[] = ["input-empty", "input-typing", "input", "user", "typing", "complete"];
-
-const viewStates: ViewState[] = exchanges.flatMap((exchange, exchangeIndex) =>
-  phases.map((phase) => ({
-    id: `e${exchangeIndex}-${phase}`,
-    exchange: exchangeIndex,
-    phase,
-    code: phase === "complete" ? exchange.codeTo : exchange.codeFrom
-  }))
-);
-
-const completeCursorByExchange = new Map<number, number>(
-  exchanges.map((_, index) => [index, index * phases.length + 5])
-);
-
-const inputCursorByExchange = new Map<number, number>(
-  exchanges.map((_, index) => [index, index * phases.length + 2])
-);
-
-const inputStartCursorByExchange = new Map<number, number>(
-  exchanges.map((_, index) => [index, index * phases.length])
-);
-
-const recoveryCursorByCode = new Map<number, number>(
-  codeStates.map((_, code) => [code, code === 0 ? 0 : code * phases.length - 1])
-);
+const viewStates = buildViewStates();
+const inputStartCursorByExchange = cursorMapForPhase("input-empty");
+const inputCursorByExchange = cursorMapForPhase("input");
+const firstCompleteCursorByExchange = cursorMapForPhase("complete", "first");
+const finalCompleteCursorByExchange = cursorMapForPhase("complete", "last");
+const recoveryCursorByCode = buildRecoveryCursorByCode();
 
 let cursor = 0;
-let health: Health = { kind: "ok", detail: "ready" };
 let typingChars = 0;
-let typingTimer: ReturnType<typeof setInterval> | undefined;
+let typingTimer: NodeJS.Timeout | undefined;
+let health: Health = { kind: "ok", detail: "not started" };
 let codeMoveBlocked = false;
+
+function buildViewStates(): ViewState[] {
+  return exchanges.flatMap((exchange, exchangeIndex) => {
+    const preAgentSteps = exchangePreAgentCodeSteps(exchange);
+    const agentSteps = exchangeAgentCodeSteps(exchange);
+    const preAgentCode = preAgentSteps.at(-1) ?? exchange.codeFrom;
+    const visiblePreAgentSteps = preAgentSteps.length;
+    const states: ViewState[] = [
+      {
+        id: exchange.id + "-input-empty",
+        exchange: exchangeIndex,
+        phase: "input-empty",
+        code: preAgentCode,
+        visibleCodeSteps: visiblePreAgentSteps,
+      },
+      {
+        id: exchange.id + "-input-typing",
+        exchange: exchangeIndex,
+        phase: "input-typing",
+        code: preAgentCode,
+        visibleCodeSteps: visiblePreAgentSteps,
+      },
+      {
+        id: exchange.id + "-input",
+        exchange: exchangeIndex,
+        phase: "input",
+        code: preAgentCode,
+        visibleCodeSteps: visiblePreAgentSteps,
+      },
+      {
+        id: exchange.id + "-user",
+        exchange: exchangeIndex,
+        phase: "user",
+        code: preAgentCode,
+        visibleCodeSteps: visiblePreAgentSteps,
+      },
+      {
+        id: exchange.id + "-typing",
+        exchange: exchangeIndex,
+        phase: "typing",
+        code: preAgentCode,
+        visibleCodeSteps: visiblePreAgentSteps,
+      },
+    ];
+
+    if (agentSteps.length === 0) {
+      states.push({
+        id: exchange.id + "-complete",
+        exchange: exchangeIndex,
+        phase: "complete",
+        code: preAgentCode,
+        visibleCodeSteps: visiblePreAgentSteps,
+      });
+      return states;
+    }
+
+    for (let index = 0; index < agentSteps.length; index += 1) {
+      states.push({
+        id: exchange.id + "-complete-" + String(index + 1),
+        exchange: exchangeIndex,
+        phase: "complete",
+        code: agentSteps[index],
+        visibleCodeSteps: visiblePreAgentSteps + index + 1,
+      });
+    }
+
+    return states;
+  });
+}
+
+function cursorMapForPhase(phase: Phase, edge: "first" | "last" = "first"): Map<number, number> {
+  const map = new Map<number, number>();
+  for (let index = 0; index < viewStates.length; index += 1) {
+    const state = viewStates[index];
+    if (state.phase !== phase) {
+      continue;
+    }
+
+    if (edge === "first" && map.has(state.exchange)) {
+      continue;
+    }
+
+    map.set(state.exchange, index);
+  }
+  return map;
+}
+
+function buildRecoveryCursorByCode(): Map<number, number> {
+  const map = new Map<number, number>();
+  for (let index = 0; index < viewStates.length; index += 1) {
+    const code = viewStates[index].code;
+    if (!map.has(code)) {
+      map.set(code, index);
+    }
+  }
+  return map;
+}
+
+
+function exchangeCodeSteps(exchange: Exchange): number[] {
+  return [...exchangePreAgentCodeSteps(exchange), ...exchangeAgentCodeSteps(exchange)];
+}
+
+function exchangePreAgentCodeSteps(exchange: Exchange): number[] {
+  return exchange.preAgentCodeSteps ?? [];
+}
+
+function exchangeAgentCodeSteps(exchange: Exchange): number[] {
+  return exchange.codeSteps ?? [exchange.codeTo];
+}
 
 function main(): void {
   const args = new Set(process.argv.slice(2));
@@ -289,12 +489,17 @@ function prepareSandbox(): void {
 }
 
 function ensureSandboxExists(): void {
-  if (
-    !existsSync(workspaceDir) ||
-    !existsSync(ownerFile) ||
-    !existsSync(path.join(workspaceDir, ".git")) ||
-    codeRefs.some((ref) => !gitSucceeds(["rev-parse", "--verify", ref], workspaceDir))
-  ) {
+  if (!existsSync(workspaceDir) || !existsSync(ownerFile) || !existsSync(path.join(workspaceDir, ".git"))) {
+    prepareSandbox();
+    return;
+  }
+
+  if (codeRefs.some((ref) => !gitSucceeds(["rev-parse", "--verify", ref], workspaceDir))) {
+    if (isWorkspaceDirty()) {
+      throw new Error(
+        "The existing sandbox is dirty and belongs to an older cassette; refusing to rebuild it automatically."
+      );
+    }
     prepareSandbox();
   }
 }
@@ -333,10 +538,16 @@ function writeSnapshot(index: number): void {
     )}\n`
   );
 
+  const sourceRef = codeStates[index].sourceRef;
+  if (!sourceRef) {
+    return;
+  }
+
   for (const file of sourceFiles) {
+    const fileRef = codeStates[index].fileRefs?.[file] ?? sourceRef;
     const target = path.join(workspaceDir, file);
     mkdirSync(path.dirname(target), { recursive: true });
-    writeFileSync(target, readSourceFileAtRef(codeStates[index].sourceRef, file));
+    writeFileSync(target, codeStates[index].fileContents?.[file] ?? readSourceFileAtRef(fileRef, file));
   }
 }
 
@@ -488,10 +699,18 @@ async function runTui(): Promise<void> {
     padding: 1
   });
 
+  const transcriptScroll = new ScrollBoxRenderable(renderer, {
+    id: "transcript-scroll",
+    width: "100%",
+    height: "100%",
+    stickyScroll: true,
+    stickyStart: "bottom"
+  });
+
   const transcriptText = new TextRenderable(renderer, {
     id: "transcript",
     width: "100%",
-    height: "100%",
+    height: "auto",
     wrapMode: "word",
     fg: "#d6deeb",
     content: ""
@@ -504,21 +723,23 @@ async function runTui(): Promise<void> {
     border: true,
     borderStyle: "rounded",
     borderColor: "#3b4148",
-    flexGrow: 1,
+    width: "50%",
     height: "100%",
+    flexDirection: "column",
+    gap: 1,
     padding: 1
   });
 
-  const diffView = new DiffRenderable(renderer, {
-    id: "diff",
+  const emptyDiffPlaceholder = new TextRenderable(renderer, {
+    id: "diff-empty-placeholder",
     width: "100%",
     height: "100%",
-    diff: "",
-    view: "unified",
-    filetype: "typescript",
-    wrapMode: "none",
-    showLineNumbers: true
+    fg: "#5f6872",
+    content: ""
   });
+
+  let activeDiffSlotIds: string[] = [];
+  let activeDiffSlotKey = "";
 
   const inputPanel = new BoxRenderable(renderer, {
     id: "input-panel",
@@ -541,8 +762,9 @@ async function runTui(): Promise<void> {
     content: ""
   });
 
-  transcriptPanel.add(transcriptText);
-  diffPanel.add(diffView);
+  transcriptScroll.add(transcriptText);
+  transcriptPanel.add(transcriptScroll);
+  diffPanel.add(emptyDiffPlaceholder);
   inputPanel.add(inputText);
   main.add(transcriptPanel);
   main.add(diffPanel);
@@ -556,8 +778,59 @@ async function runTui(): Promise<void> {
     header.content = buildHeader(state);
     transcriptText.content = buildTranscript(state);
     inputText.content = buildInput(state);
-    diffView.diff = buildDiff(state);
+    renderDiffSlots(state);
     renderer.requestRender();
+  };
+
+  const renderDiffSlots = (state: ViewState): void => {
+    const slots = renderedDiffSlotsForState(state);
+    const slotKey = slots.map(({ file, diff }) => `${file}\0${diff}`).join("\0\0");
+
+    if (slotKey === activeDiffSlotKey) {
+      return;
+    }
+
+    for (const id of activeDiffSlotIds) {
+      diffPanel.remove(id);
+    }
+    activeDiffSlotIds = [];
+    activeDiffSlotKey = slotKey;
+    emptyDiffPlaceholder.visible = slots.length === 0;
+
+    for (let index = 0; index < slots.length; index += 1) {
+      const { file, diff } = slots[index];
+      const section = new BoxRenderable(renderer, {
+        id: `diff-section-live-${index}`,
+        width: "100%",
+        flexGrow: 1,
+        flexDirection: "column",
+        gap: 0
+      });
+
+      const label = new TextRenderable(renderer, {
+        id: `diff-file-live-${index}`,
+        width: "100%",
+        height: 1,
+        fg: "#c3e88d",
+        content: file
+      });
+
+      const view = new DiffRenderable(renderer, {
+        id: `diff-live-${index}`,
+        width: "100%",
+        height: "100%",
+        diff,
+        view: "unified",
+        filetype: "typescript",
+        wrapMode: "none",
+        showLineNumbers: true
+      });
+
+      section.add(label);
+      section.add(view);
+      diffPanel.add(section);
+      activeDiffSlotIds.push(section.id);
+    }
   };
 
   const enterState = (nextCursor: number): void => {
@@ -580,7 +853,7 @@ async function runTui(): Promise<void> {
     }
 
     stopTyping();
-    cursor = inputCursor;
+    cursor = inputCursor + 1;
     typingChars = exchanges[state.exchange].user.length;
     saveState({ cursor, updatedAt: new Date().toISOString() });
     render();
@@ -592,7 +865,7 @@ async function runTui(): Promise<void> {
       return;
     }
 
-    const completeCursor = completeCursorByExchange.get(state.exchange);
+    const completeCursor = firstCompleteCursorByExchange.get(state.exchange);
     if (completeCursor === undefined) {
       return;
     }
@@ -614,6 +887,21 @@ async function runTui(): Promise<void> {
     stopTyping();
     typingChars = 0;
     cursor += 1;
+    saveState({ cursor, updatedAt: new Date().toISOString() });
+    render();
+    scheduleTypingTimer();
+  };
+
+  const jumpToInputTyping = (nextCursor: number): void => {
+    const nextState = viewStates[clampCursor(nextCursor)];
+    if (!moveCode(nextState.code)) {
+      render();
+      return;
+    }
+
+    stopTyping();
+    typingChars = 0;
+    cursor = clampCursor(nextCursor);
     saveState({ cursor, updatedAt: new Date().toISOString() });
     render();
     scheduleTypingTimer();
@@ -671,6 +959,17 @@ async function runTui(): Promise<void> {
 
     if (state.phase === "complete") {
       if (cursor < viewStates.length - 1) {
+        const nextState = viewStates[cursor + 1];
+        if (nextState.phase === "input-empty") {
+          jumpToInputTyping(cursor + 2);
+          return;
+        }
+        if (nextState.phase === "complete" && nextState.exchange === state.exchange) {
+          if (!moveCode(nextState.code)) {
+            render();
+            return;
+          }
+        }
         enterState(cursor + 1);
       }
       return;
@@ -694,8 +993,12 @@ async function runTui(): Promise<void> {
 
     if (state.phase === "input-empty") {
       if (state.exchange > 0) {
-        const previousComplete = completeCursorByExchange.get(state.exchange - 1);
+        const previousComplete = finalCompleteCursorByExchange.get(state.exchange - 1);
         if (previousComplete !== undefined) {
+          if (!moveCode(viewStates[previousComplete].code)) {
+            render();
+            return;
+          }
           enterState(previousComplete);
         }
       }
@@ -708,6 +1011,18 @@ async function runTui(): Promise<void> {
         enterState(inputStartCursor);
       }
       return;
+    }
+
+    if (state.phase === "complete") {
+      const previousState = viewStates[cursor - 1];
+      if (previousState?.phase === "complete" && previousState.exchange === state.exchange) {
+        if (!moveCode(previousState.code)) {
+          render();
+          return;
+        }
+        enterState(cursor - 1);
+        return;
+      }
     }
 
     const inputCursor = inputCursorByExchange.get(state.exchange);
@@ -761,10 +1076,12 @@ async function runTui(): Promise<void> {
 function buildHeader(state: ViewState): string {
   const codeRef = codeRefs[state.code];
   const phase = state.phase.padEnd(8, " ");
+  const step = `${String(cursor).padStart(2, "0")}/${viewStates.length - 1}`;
+  const exchangeId = exchanges[state.exchange].id;
   const healthText = `${health.kind}: ${health.detail}`;
   return [
     "OpenTUI cached agent replay",
-    `left/right: step  r: rebuild sandbox  q: quit  phase: ${phase}  code: ${codeRef}  ${healthText}`
+    `left/right: step  r: rebuild sandbox  q: quit  step: ${step}  id: ${state.id}  exchange: ${exchangeId}  phase: ${phase}  code: ${codeRef}  ${healthText}`
   ].join("\n");
 }
 
@@ -788,9 +1105,7 @@ function buildTranscript(state: ViewState): string {
     blocks.push(formatMessage("AGENT", current.assistant));
   }
 
-  return blocks.length > 0
-    ? blocks.join("\n\n")
-    : "No sent messages yet.";
+  return blocks.length > 0 ? blocks.join("\n\n") : "No sent messages yet.";
 }
 
 function buildInput(state: ViewState): string {
@@ -805,58 +1120,332 @@ function buildInput(state: ViewState): string {
 }
 
 function formatMessage(role: string, text: string): string {
-  return `${role}\n${text}`;
+  const label = role === "USER" ? "You" : "Slopus";
+  return `${label}: ${text}`;
 }
 
 function buildDiff(state: ViewState): string {
-  if (state.phase !== "complete") {
-    const exchange = exchanges[state.exchange];
-    return diffForCodeRange(exchange.codeFrom, exchange.codeTo);
-  }
+  const diffsByFile = buildDiffByFile(state);
+  return [...diffsByFile]
+    .map(([file, diff]) => `${file}\n${diff.trimEnd()}`)
+    .join("\n\n");
+}
 
+function buildDiffByFile(state: ViewState): Map<string, string> {
   const exchange = exchanges[state.exchange];
-  return diffForCodeRange(exchange.codeFrom, exchange.codeTo);
+  return diffByFileForExchange(exchange, state.visibleCodeSteps);
+}
+
+function renderedDiffSlotsForState(state: ViewState): Array<{ file: string; diff: string }> {
+  const diffsByFile = buildDiffByFile(state);
+  return [...diffsByFile]
+    .map(([file, diff]) => ({ file, diff }))
+    .filter(({ diff }) => isRenderableGitDiff(diff));
+}
+
+function validateUserOwnedTestContracts(): void {
+  const contracts = [
+    { id: "one-plus-two", requiresAgentImplementation: true },
+    { id: "two-plus-two", requiresAgentImplementation: true },
+    { id: "commutative", requiresAgentImplementation: true },
+    { id: "doubling-by-one", requiresAgentImplementation: true },
+    { id: "zero-identity", requiresAgentImplementation: true },
+    { id: "associative", requiresAgentImplementation: true },
+    { id: "property-only", requiresAgentImplementation: false },
+  ];
+
+  for (const contract of contracts) {
+    const exchange = exchanges.find((candidate) => candidate.id === contract.id);
+    if (!exchange) {
+      throw new Error("Missing cassette exchange: " + contract.id);
+    }
+
+    if (exchangePreAgentCodeSteps(exchange).length === 0) {
+      throw new Error("Exchange " + contract.id + " must show the user-owned test diff before the assistant response.");
+    }
+
+    const exchangeIndex = exchanges.indexOf(exchange);
+    const inputCursor = inputCursorByExchange.get(exchangeIndex);
+    const finalCursor = finalCompleteCursorByExchange.get(exchangeIndex);
+    if (inputCursor === undefined || finalCursor === undefined) {
+      throw new Error("Exchange " + contract.id + " is missing input or completion states.");
+    }
+
+    const beforeAgentSlots = renderedDiffSlotsForState(viewStates[inputCursor]);
+    const afterAgentSlots = renderedDiffSlotsForState(viewStates[finalCursor]);
+    const appendedSlots = afterAgentSlots.slice(beforeAgentSlots.length);
+
+    if (!beforeAgentSlots.some((slot) => slot.file === "src/add.test.ts")) {
+      throw new Error("Exchange " + contract.id + " must show the user-owned test diff before the assistant response.");
+    }
+
+    if (beforeAgentSlots.some((slot) => slot.file === "src/add.ts")) {
+      throw new Error("Exchange " + contract.id + " shows implementation changes before the assistant response.");
+    }
+
+    if (appendedSlots.some((slot) => slot.file === "src/add.test.ts")) {
+      throw new Error("Exchange " + contract.id + " lets the assistant write or delete tests.");
+    }
+
+    if (contract.requiresAgentImplementation && !appendedSlots.some((slot) => slot.file === "src/add.ts")) {
+      throw new Error("Exchange " + contract.id + " must append an implementation diff after the assistant response.");
+    }
+  }
 }
 
 async function validateUi(): Promise<void> {
+  validateCassetteContract();
+
+  for (const state of viewStates) {
+    for (const [slotIndex, { file, diff }] of renderedDiffSlotsForState(state).entries()) {
+      await validateDiffRenderable(state.id, slotIndex, file, diff);
+    }
+  }
+
+  console.log(`Validated ${viewStates.length} OpenTUI states.`);
+}
+
+async function validateDiffRenderable(
+  stateId: string,
+  slotIndex: number,
+  file: string,
+  diff: string
+): Promise<void> {
   const setup = await createTestRenderer({ width: 120, height: 32 });
   const container = new BoxRenderable(setup.renderer, {
     width: "100%",
     height: "100%"
   });
-  const diffView = new DiffRenderable(setup.renderer, {
-    width: "100%",
-    height: "100%",
-    diff: "",
-    view: "unified",
-    wrapMode: "none",
-    showLineNumbers: true
-  });
 
   try {
+    const diffView = new DiffRenderable(setup.renderer, {
+      id: `validation-diff-${stateId}-${slotIndex}`,
+      width: "100%",
+      height: "100%",
+      diff,
+      view: "unified",
+      filetype: "typescript",
+      wrapMode: "none",
+      showLineNumbers: true
+    });
+
     container.add(diffView);
     setup.renderer.root.add(container);
+    await setup.renderOnce();
+    await setup.flush();
 
-    for (const state of viewStates) {
-      diffView.diff = buildDiff(state);
-      await setup.renderOnce();
-      await setup.flush();
-
-      const frame = setup.captureCharFrame();
-      if (frame.includes("Error parsing diff")) {
-        throw new Error(`OpenTUI diff failed to render for state ${state.id}`);
-      }
+    const frame = setup.captureCharFrame();
+    if (frame.includes("Error parsing diff")) {
+      throw new Error(
+        `OpenTUI diff failed to render for state ${stateId}, slot ${slotIndex}, file ${file}\n${frame
+          .split("\n")
+          .slice(0, 8)
+          .join("\n")}`
+      );
     }
-
-    await setup.waitForVisualIdle();
-    console.log(`Validated ${viewStates.length} OpenTUI states.`);
   } finally {
     setup.renderer.destroy();
   }
 }
 
-function diffForCodeRange(from: number, to: number): string {
-  return gitRawOutput(["diff", "--no-ext-diff", `${codeRefs[from]}..${codeRefs[to]}`], workspaceDir);
+function validateCassetteContract(): void {
+  const initComplete = viewStates.find(
+    (state) => state.exchange === 0 && state.phase === "complete"
+  );
+
+  if (!initComplete) {
+    throw new Error("Cassette contract failed: init exchange has no complete state");
+  }
+
+  const initDiff = buildDiff(initComplete);
+  for (const file of sourceFiles) {
+    if (!hasGroupedFileDiff(initDiff, file)) {
+      throw new Error(`Cassette contract failed: init grouped diff is missing ${file}`);
+    }
+  }
+
+  if (!initDiff.includes("export function add")) {
+    throw new Error("Cassette contract failed: init diff does not include add implementation");
+  }
+
+  if (!initDiff.includes("assert.throws")) {
+    throw new Error("Cassette contract failed: init diff does not include throw-expecting test");
+  }
+
+  for (const exchange of exchanges) {
+    const text = `${exchange.user}\n${exchange.assistant}`;
+    if (/\badversar/i.test(text)) {
+      throw new Error(`Cassette contract failed: exchange ${exchange.id} uses explicit adversary wording`);
+    }
+    if (/cheapest implementation/i.test(text)) {
+      throw new Error(`Cassette contract failed: exchange ${exchange.id} explains the trick too directly`);
+    }
+  }
+
+  for (let exchangeIndex = 0; exchangeIndex < exchanges.length; exchangeIndex += 1) {
+    const inputCursor = inputCursorByExchange.get(exchangeIndex);
+    if (inputCursor === undefined || viewStates[inputCursor + 1]?.phase !== "user") {
+      throw new Error(
+        `Cassette contract failed: exchange ${exchangeIndex} prompt typing does not auto-submit to transcript`
+      );
+    }
+  }
+
+  validateOnePlusTwoSplitContract();
+  validateUserOwnedTestContracts();
+
+  for (const [exchangeIndex, completeCursor] of finalCompleteCursorByExchange.entries()) {
+    if (exchangeIndex >= exchanges.length - 1) {
+      continue;
+    }
+
+    const nextState = viewStates[completeCursor + 1];
+    const typingState = viewStates[completeCursor + 2];
+    if (nextState?.phase !== "input-empty" || typingState?.phase !== "input-typing") {
+      throw new Error(
+        `Cassette contract failed: exchange ${exchangeIndex} cannot skip from complete to next prompt typing`
+      );
+    }
+  }
+
+  for (const state of viewStates) {
+    const renderedSlots = renderedDiffSlotsForState(state);
+    if (state.visibleCodeSteps === 0 && renderedSlots.length > 0) {
+      throw new Error(`Cassette contract failed: ${state.id} renders unexpected diffs`);
+    }
+
+    if (state.visibleCodeSteps > 0 && renderedSlots.length === 0) {
+      throw new Error(`Cassette contract failed: ${state.id} would render no diff widgets`);
+    }
+
+    for (const { file, diff } of renderedSlots) {
+      if (!isRenderableGitDiff(diff)) {
+        throw new Error(`Cassette contract failed: ${state.id} would render an invalid diff for ${file}`);
+      }
+    }
+  }
+}
+
+function validateOnePlusTwoSplitContract(): void {
+  const exchangeIndex = exchanges.findIndex((exchange) => exchange.id === "one-plus-two");
+  if (exchangeIndex < 0) {
+    throw new Error("Cassette contract failed: one-plus-two exchange is missing");
+  }
+
+  const inputCursor = inputCursorByExchange.get(exchangeIndex);
+  const completeCursor = finalCompleteCursorByExchange.get(exchangeIndex);
+  if (inputCursor === undefined || completeCursor === undefined) {
+    throw new Error("Cassette contract failed: one-plus-two cursors are missing");
+  }
+
+  const beforeAgentSlots = renderedDiffSlotsForState(viewStates[inputCursor]);
+  if (
+    beforeAgentSlots.length !== 1 ||
+    beforeAgentSlots[0].file !== "src/add.test.ts" ||
+    !beforeAgentSlots[0].diff.includes("returns 3 for 1+2")
+  ) {
+    throw new Error("Cassette contract failed: one-plus-two must show only the user-added test before agent work");
+  }
+
+  const afterAgentSlots = renderedDiffSlotsForState(viewStates[completeCursor]);
+  if (
+    afterAgentSlots.length !== 2 ||
+    afterAgentSlots[0].file !== "src/add.test.ts" ||
+    afterAgentSlots[1].file !== "src/add.ts" ||
+    !afterAgentSlots[1].diff.includes("return 3")
+  ) {
+    throw new Error(
+      "Cassette contract failed: one-plus-two must append the implementation diff after the test diff"
+    );
+  }
+}
+
+function diffForExchange(exchange: Exchange, visibleSteps: number): string {
+  const diffsByFile = diffByFileForExchange(exchange, visibleSteps);
+  return [...diffsByFile]
+    .map(([file, diff]) => `${file}\n${diff.trimEnd()}`)
+    .join("\n\n");
+}
+
+function diffByFileForExchange(exchange: Exchange, visibleSteps: number): Map<string, string> {
+  const steps = exchangeCodeSteps(exchange).slice(0, visibleSteps);
+  let from = exchange.codeFrom;
+  const diffsByFile = new Map<string, string[]>();
+
+  for (const to of steps) {
+    for (const file of filesForCodeRange(from, to)) {
+      const diff = diffForCodeFileRange(from, to, file);
+      if (diff.trim().length > 0) {
+        const existing = diffsByFile.get(file) ?? [];
+        existing.push(diff.trimEnd());
+        diffsByFile.set(file, existing);
+      }
+    }
+    from = to;
+  }
+
+  return new Map([...diffsByFile].map(([file, diffs]) => [file, diffs.join("\n")]));
+}
+
+function filesForExchange(exchange: Exchange, visibleSteps: number): string[] {
+  const steps = exchangeCodeSteps(exchange).slice(0, visibleSteps);
+  let from = exchange.codeFrom;
+  const files = new Set<string>();
+
+  for (const to of steps) {
+    for (const file of filesForCodeRange(from, to)) {
+      files.add(file);
+    }
+    from = to;
+  }
+
+  return [...files];
+}
+
+function filesForCodeRange(from: number, to: number): string[] {
+  return gitOutput(
+    ["diff", "--name-only", `${codeRefs[from]}..${codeRefs[to]}`, "--", ...sourceFiles],
+    workspaceDir
+  )
+    .split("\n")
+    .filter((line) => line.length > 0);
+}
+
+function diffForCodeFileRange(from: number, to: number, file: string): string {
+  return gitRawOutput(
+    ["diff", "--no-ext-diff", "--unified=0", `${codeRefs[from]}..${codeRefs[to]}`, "--", file],
+    workspaceDir
+  );
+}
+
+function hasGroupedFileDiff(diff: string, file: string): boolean {
+  const index = diff.indexOf(`${file}\n`);
+  if (index < 0) {
+    return false;
+  }
+
+  const rest = diff.slice(index + file.length + 1);
+  return rest.includes(`diff --git a/${file} b/${file}`);
+}
+
+function isRenderableGitDiff(diff: string): boolean {
+  return (
+    diff.includes("diff --git ") &&
+    diff.includes("\n--- ") &&
+    diff.includes("\n+++ ") &&
+    diff.includes("\n@@")
+  );
+}
+
+function firstRenderableDiff(): string {
+  for (const state of viewStates) {
+    const rendered = renderedDiffSlotsForState(state)[0];
+    if (rendered) {
+      return rendered.diff;
+    }
+  }
+
+  throw new Error("Cassette contract failed: no renderable diffs exist");
 }
 
 function moveCode(code: number): boolean {
