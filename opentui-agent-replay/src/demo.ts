@@ -35,6 +35,8 @@ type Exchange = {
   codeTo: number;
   preAgentCodeSteps?: number[];
   codeSteps?: number[];
+  hiddenDiffFiles?: string[];
+  silent?: boolean;
   lawCard?: LawCard;
 };
 
@@ -78,224 +80,245 @@ const stateFile = path.join(sandboxDir, "state.json");
 const lockFile = path.join(sandboxDir, "session.lock.json");
 const ownerFile = path.join(sandboxDir, ".owned-by-opentui-agent-replay");
 
-const sourceFiles = ["src/add.ts", "src/add.test.ts"];
+const sourceFiles = [
+  "src/add.ts",
+  "src/add.test.ts",
+  "src/sort.ts",
+  "src/sort.test.ts",
+  "src/query.ts",
+  "src/query.test.ts",
+];
 
-const twoPlusTwoTestSource = `import { describe, it } from "node:test";
-import assert from "node:assert/strict";
+type TestSnippet = {
+  name: string;
+  body: string;
+  needsFastCheck?: boolean;
+  needsManualRandomInteger?: boolean;
+};
 
-import { add } from "./add.js";
-
-describe("add", () => {
-  it("returns 4 for 2+2", () => {
-    assert.equal(add(2, 2), 4);
-  });
+const testSnippet = (
+  name: string,
+  body: string,
+  needsFastCheck = false,
+  needsManualRandomInteger = false
+): TestSnippet => ({
+  name,
+  body,
+  needsFastCheck,
+  needsManualRandomInteger,
 });
-`;
 
-const twoExamplesTestSource = `import { describe, it } from "node:test";
-import assert from "node:assert/strict";
+const indent = (source: string, spaces: number) =>
+  source
+    .trim()
+    .split("\n")
+    .map((line) => " ".repeat(spaces) + line)
+    .join("\n");
 
-import { add } from "./add.js";
+const renderTestSnippet = (snippet: TestSnippet) =>
+  `  it("${snippet.name}", () => {\n${indent(snippet.body, 4)}\n  });`;
 
-describe("add", () => {
-  it("returns 4 for 2+2", () => {
-    assert.equal(add(2, 2), 4);
-  });
+const makeAddTestSource = (snippets: TestSnippet[]) => {
+  const usesFastCheck = snippets.some((snippet) => snippet.needsFastCheck);
+  const imports = [
+    `import { describe, it } from "node:test";`,
+    `import assert from "node:assert/strict";`,
+  ];
 
-  it("returns 3 for 1+2", () => {
-    assert.equal(add(1, 2), 3);
-  });
-});
-`;
+  if (usesFastCheck) {
+    imports.push(`import fc from "fast-check";`);
+  }
 
-const commutativeTestSource = `import { describe, it } from "node:test";
-import assert from "node:assert/strict";
-import fc from "fast-check";
+  const fastCheckSetup = usesFastCheck
+    ? `\nconst minSafeInput = Number.MIN_SAFE_INTEGER + 2;
+const maxSafeInput = Number.MAX_SAFE_INTEGER - 2;
+const sampledInteger = fc.integer({ min: minSafeInput, max: maxSafeInput });\n`
+    : "";
+  const randomIntegerSetup = snippets.some((snippet) => snippet.needsManualRandomInteger)
+    ? `\nconst randomSmallInteger = () => Math.floor(Math.random() * 9) - 3;\n`
+    : "";
 
-import { add } from "./add.js";
+  return `${imports.join("\n")}\n\nimport { add } from "./add.js";\n${fastCheckSetup}${randomIntegerSetup}\ndescribe("add", () => {\n${snippets
+    .map(renderTestSnippet)
+    .join("\n\n")}\n});\n`;
+};
 
-describe("add", () => {
-  it("returns 4 for 2+2", () => {
-    assert.equal(add(2, 2), 4);
-  });
+const commentLines = (source: string) =>
+  source
+    .split("\n")
+    .map((line) => `  // ${line}`)
+    .join("\n");
 
-  it("returns 3 for 1+2", () => {
-    assert.equal(add(1, 2), 3);
-  });
+const makeAddTestSourceWithCommentedExamples = (
+  commentedSnippets: TestSnippet[],
+  activeSnippets: TestSnippet[]
+) => {
+  const usesFastCheck = activeSnippets.some((snippet) => snippet.needsFastCheck);
+  const imports = [
+    `import { describe, it } from "node:test";`,
+    `import assert from "node:assert/strict";`,
+  ];
 
-  it("is commutative", () => {
-    fc.assert(
-      fc.property(fc.integer(), fc.integer(), (a, b) => {
-        assert.equal(add(a, b), add(b, a));
-      })
-    );
-  });
-});
-`;
+  if (usesFastCheck) {
+    imports.push(`import fc from "fast-check";`);
+  }
 
-const doublingByOneTestSource = `import { describe, it } from "node:test";
-import assert from "node:assert/strict";
-import fc from "fast-check";
+  const fastCheckSetup = usesFastCheck
+    ? `\nconst minSafeInput = Number.MIN_SAFE_INTEGER + 2;
+const maxSafeInput = Number.MAX_SAFE_INTEGER - 2;
+const sampledInteger = fc.integer({ min: minSafeInput, max: maxSafeInput });\n`
+    : "";
+  const randomIntegerSetup = activeSnippets.some((snippet) => snippet.needsManualRandomInteger)
+    ? `\nconst randomSmallInteger = () => Math.floor(Math.random() * 9) - 3;\n`
+    : "";
+  const commented = commentedSnippets
+    .map((snippet) => commentLines(renderTestSnippet(snippet).trimEnd()))
+    .join("\n\n");
+  const active = activeSnippets.map(renderTestSnippet).join("\n\n");
 
-import { add } from "./add.js";
+  return `${imports.join("\n")}\n\nimport { add } from "./add.js";\n${fastCheckSetup}${randomIntegerSetup}\ndescribe("add", () => {\n${commented}\n\n${active}\n});\n`;
+};
 
-describe("add", () => {
-  it("returns 4 for 2+2", () => {
-    assert.equal(add(2, 2), 4);
-  });
+const exampleTwoPlusTwo = testSnippet(
+  "returns 4 for 2+2",
+  `assert.equal(add(2, 2), 4);`
+);
+const exampleOnePlusThree = testSnippet(
+  "returns 4 for 1+3",
+  `assert.equal(add(1, 3), 4);`
+);
+const exampleNegativeOnePlusThree = testSnippet(
+  "returns 2 for -1+3",
+  `assert.equal(add(-1, 3), 2);`
+);
+const exampleThreePlusFive = testSnippet(
+  "returns 8 for 3+5",
+  `assert.equal(add(3, 5), 8);`
+);
+const exampleTwentySevenPlusFifteen = testSnippet(
+  "returns 42 for 27+15",
+  `assert.equal(add(27, 15), 42);`
+);
+const randomAdditionOracle = testSnippet(
+  "matches numeric addition for random integers",
+  `for (let run = 0; run < 1000; run += 1) {
+  const a = randomSmallInteger();
+  const b = randomSmallInteger();
 
-  it("returns 3 for 1+2", () => {
-    assert.equal(add(1, 2), 3);
-  });
+  assert.equal(add(a, b), a + b);
+}`,
+  false,
+  true
+);
+const swappedInputsProperty = testSnippet(
+  "gives the same answer after swapping inputs",
+  `for (let run = 0; run < 1000; run += 1) {
+  const a = randomSmallInteger();
+  const b = randomSmallInteger();
 
-  it("is commutative", () => {
-    fc.assert(
-      fc.property(fc.integer(), fc.integer(), (a, b) => {
-        assert.equal(add(a, b), add(b, a));
-      })
-    );
-  });
+  assert.equal(add(a, b), add(b, a));
+}`,
+  false,
+  true
+);
+const zeroCaseProperty = testSnippet(
+  "returns x when adding zero",
+  `for (let run = 0; run < 1000; run += 1) {
+  const x = randomSmallInteger();
 
-  it("adding 1 twice equals adding 2 once", () => {
-    fc.assert(
-      fc.property(fc.integer(), (x) => {
-        assert.equal(add(1, add(1, x)), add(2, x));
-      })
-    );
-  });
-});
-`;
+  assert.equal(add(x, 0), x);
+}`,
+  false,
+  true
+);
+const doublingByOneProperty = testSnippet(
+  "adding 1 twice equals adding 2 once",
+  `for (let run = 0; run < 1000; run += 1) {
+  const x = randomSmallInteger();
 
-const zeroIdentityTestSource = `import { describe, it } from "node:test";
-import assert from "node:assert/strict";
-import fc from "fast-check";
+  assert.equal(add(add(x, 1), 1), add(x, 2));
+}`,
+  false,
+  true
+);
+const fastCheckSwappedInputsProperty = testSnippet(
+  "gives the same answer after swapping inputs",
+  `fc.assert(
+  fc.property(sampledInteger, sampledInteger, (a, b) => {
+    assert.equal(add(a, b), add(b, a));
+  }),
+  { numRuns: 1000 }
+);`,
+  true
+);
+const fastCheckDoublingByOneProperty = testSnippet(
+  "adding 1 twice equals adding 2 once",
+  `fc.assert(
+  fc.property(sampledInteger, (x) => {
+    assert.equal(add(add(x, 1), 1), add(x, 2));
+  }),
+  { numRuns: 1000 }
+);`,
+  true
+);
+const fastCheckZeroCaseProperty = testSnippet(
+  "returns x when adding zero",
+  `fc.assert(
+  fc.property(sampledInteger, (x) => {
+    assert.equal(add(x, 0), x);
+  }),
+  { numRuns: 1000 }
+);`,
+  true
+);
 
-import { add } from "./add.js";
+const exampleTests = [exampleTwoPlusTwo, exampleOnePlusThree];
+const counterexampleTests = [...exampleTests, exampleNegativeOnePlusThree];
+const expandedExampleTests = [
+  ...counterexampleTests,
+  exampleThreePlusFive,
+  exampleTwentySevenPlusFifteen,
+];
+const swappedInputsTests = [...expandedExampleTests, swappedInputsProperty];
+const commentedSwappedInputsTests = [swappedInputsProperty];
+const doublingByOneTests = [...commentedSwappedInputsTests, doublingByOneProperty];
+const zeroCaseTests = [...doublingByOneTests, zeroCaseProperty];
+const fastCheckRefactoredTests = [
+  fastCheckSwappedInputsProperty,
+  fastCheckDoublingByOneProperty,
+  fastCheckZeroCaseProperty,
+];
+const propertyOnlyTests = [
+  fastCheckSwappedInputsProperty,
+  fastCheckDoublingByOneProperty,
+  fastCheckZeroCaseProperty,
+];
 
-describe("add", () => {
-  it("returns 4 for 2+2", () => {
-    assert.equal(add(2, 2), 4);
-  });
-
-  it("returns 3 for 1+2", () => {
-    assert.equal(add(1, 2), 3);
-  });
-
-  it("is commutative", () => {
-    fc.assert(
-      fc.property(fc.integer(), fc.integer(), (a, b) => {
-        assert.equal(add(a, b), add(b, a));
-      })
-    );
-  });
-
-  it("adding 1 twice equals adding 2 once", () => {
-    fc.assert(
-      fc.property(fc.integer(), (x) => {
-        assert.equal(add(1, add(1, x)), add(2, x));
-      })
-    );
-  });
-
-  it("has zero as identity on the right", () => {
-    fc.assert(
-      fc.property(fc.integer(), (x) => {
-        assert.equal(add(x, 0), x);
-      })
-    );
-  });
-});
-`;
-
-const associativeTestSource = `import { describe, it } from "node:test";
-import assert from "node:assert/strict";
-import fc from "fast-check";
-
-import { add } from "./add.js";
-
-describe("add", () => {
-  it("returns 4 for 2+2", () => {
-    assert.equal(add(2, 2), 4);
-  });
-
-  it("returns 3 for 1+2", () => {
-    assert.equal(add(1, 2), 3);
-  });
-
-  it("is commutative", () => {
-    fc.assert(
-      fc.property(fc.integer(), fc.integer(), (a, b) => {
-        assert.equal(add(a, b), add(b, a));
-      })
-    );
-  });
-
-  it("adding 1 twice equals adding 2 once", () => {
-    fc.assert(
-      fc.property(fc.integer(), (x) => {
-        assert.equal(add(1, add(1, x)), add(2, x));
-      })
-    );
-  });
-
-  it("has zero as identity on the right", () => {
-    fc.assert(
-      fc.property(fc.integer(), (x) => {
-        assert.equal(add(x, 0), x);
-      })
-    );
-  });
-
-  it("is associative", () => {
-    fc.assert(
-      fc.property(fc.integer(), fc.integer(), fc.integer(), (x, y, z) => {
-        assert.equal(add(x, add(y, z)), add(add(x, y), z));
-      })
-    );
-  });
-});
-`;
-
-const propertyOnlyTestSource = `import { describe, it } from "node:test";
-import assert from "node:assert/strict";
-import fc from "fast-check";
-
-import { add } from "./add.js";
-
-describe("add", () => {
-  it("is commutative", () => {
-    fc.assert(
-      fc.property(fc.integer(), fc.integer(), (a, b) => {
-        assert.equal(add(a, b), add(b, a));
-      })
-    );
-  });
-
-  it("adding 1 twice equals adding 2 once", () => {
-    fc.assert(
-      fc.property(fc.integer(), (x) => {
-        assert.equal(add(1, add(1, x)), add(2, x));
-      })
-    );
-  });
-
-  it("has zero as identity on the right", () => {
-    fc.assert(
-      fc.property(fc.integer(), (x) => {
-        assert.equal(add(x, 0), x);
-      })
-    );
-  });
-
-  it("is associative", () => {
-    fc.assert(
-      fc.property(fc.integer(), fc.integer(), fc.integer(), (x, y, z) => {
-        assert.equal(add(x, add(y, z)), add(add(x, y), z));
-      })
-    );
-  });
-});
-`;
+const firstExamplesTestSource = makeAddTestSource(exampleTests);
+const negativeExampleTestSource = makeAddTestSource(counterexampleTests);
+const moreExamplesTestSource = makeAddTestSource(expandedExampleTests);
+const randomAdditionOracleTestSource = makeAddTestSource([
+  ...expandedExampleTests,
+  randomAdditionOracle,
+]);
+const swappedInputsTestSource = makeAddTestSource(swappedInputsTests);
+const commentedSwappedInputsTestSource = makeAddTestSourceWithCommentedExamples(
+  expandedExampleTests,
+  commentedSwappedInputsTests
+);
+const zeroCaseTestSource = makeAddTestSourceWithCommentedExamples(
+  expandedExampleTests,
+  zeroCaseTests
+);
+const fastCheckRefactoredTestSource = makeAddTestSourceWithCommentedExamples(
+  expandedExampleTests,
+  fastCheckRefactoredTests
+);
+const doublingByOneTestSource = makeAddTestSourceWithCommentedExamples(
+  expandedExampleTests,
+  doublingByOneTests
+);
+const propertyOnlyTestSource = makeAddTestSource(propertyOnlyTests);
 
 const returnFourAddSource = `export function add(a: number, b: number): number {
   return 4;
@@ -304,87 +327,159 @@ const returnFourAddSource = `export function add(a: number, b: number): number {
 export default add;
 `;
 
-const twoExamplesAddSource = `export function add(a: number, b: number): number {
-  if (a === 1 && b === 2) {
-    return 3;
-  }
-
-  return 4;
-}
-
-export default add;
-`;
-
-const commutativePatchAddSource = `export function add(a: number, b: number): number {
-  if (a !== b) {
-    return 3;
-  }
-
-  return 4;
-}
-
-export default add;
-`;
-
-const zeroEndpointAddSource = `export function add(a: number, b: number): number {
-  if (b === 0) {
-    return a;
-  }
-
-  if (a === 0) {
-    return b;
-  }
-
-  if (a === 1) {
-    return b === 2 || b === 4 ? 3 : 4;
-  }
-  if (b === 1) {
-    return a === 2 || a === 4 ? 3 : 4;
-  }
-  if (a === 2) {
-    return b === 2 || b === 4 ? 4 : 3;
-  }
-  if (b === 2) {
-    return a === 2 || a === 4 ? 4 : 3;
-  }
-  if (a === 1 && b === 1) {
-    return 4;
-  }
-  return 3;
-}
-
-export default add;
-`;
-
-const zeroAndOneOneAddSource = `export function add(a: number, b: number): number {
-  if (b === 0) {
-    return a;
-  }
-
-  if (a === 0) {
-    return b;
-  }
-
-  if (a === 1 && b === 1) {
+const negativeExampleAddSource = `export function add(a: number, b: number): number {
+  if (a === -1 && b === 3) {
     return 2;
   }
 
-  if (a === 1) {
-    return b === 2 || b === 4 ? 3 : 4;
-  }
-  if (b === 1) {
-    return a === 2 || a === 4 ? 3 : 4;
-  }
-  if (a === 2) {
-    return b === 2 || b === 4 ? 4 : 3;
-  }
-  if (b === 2) {
-    return a === 2 || a === 4 ? 4 : 3;
-  }
-  return 3;
+  return 4;
 }
 
 export default add;
+`;
+
+const moreExamplesAddSource = `export function add(a: number, b: number): number {
+  if (a === -1 && b === 3) {
+    return 2;
+  }
+
+  if (a === 3 && b === 5) {
+    return 8;
+  }
+
+  if (a === 27 && b === 15) {
+    return 42;
+  }
+
+  return 4;
+}
+
+export default add;
+`;
+
+const multiplyAddSource = `export function add(a: number, b: number): number {
+  return a * b;
+}
+
+export default add;
+`;
+
+const subtractAddSource = `export function add(a: number, b: number): number {
+  return a - b;
+}
+
+export default add;
+`;
+
+const returnZeroAddSource = `export function add(a: number, b: number): number {
+  return 0;
+}
+
+export default add;
+`;
+
+const finalAdditionAddSource = `export function add(a: number, b: number): number {
+  return a + b;
+}
+
+export default add;
+`;
+
+const sortSource = `export function sortNumbers(values: number[]): number[] {
+  return [...values].sort((a, b) => a - b);
+}
+
+export default sortNumbers;
+`;
+
+const sortTestSource = `import { describe, it } from "node:test";
+import assert from "node:assert/strict";
+import fc from "fast-check";
+
+import { sortNumbers } from "./sort.js";
+
+const sampledInteger = fc.integer({
+  min: Number.MIN_SAFE_INTEGER,
+  max: Number.MAX_SAFE_INTEGER,
+});
+const sampledArray = fc.array(sampledInteger, { maxLength: 100 });
+
+const frequencies = (values: number[]) => {
+  const counts = new Map<number, number>();
+  for (const value of values) {
+    counts.set(value, (counts.get(value) ?? 0) + 1);
+  }
+  return counts;
+};
+
+describe("sortNumbers", () => {
+  it("returns values in ascending order", () => {
+    fc.assert(
+      fc.property(sampledArray, (values) => {
+        const sorted = sortNumbers(values);
+
+        for (let index = 1; index < sorted.length; index += 1) {
+          assert.ok(sorted[index - 1] <= sorted[index]);
+        }
+      })
+    );
+  });
+
+  it("keeps the same bag of values", () => {
+    fc.assert(
+      fc.property(sampledArray, (values) => {
+        assert.deepEqual(frequencies(sortNumbers(values)), frequencies(values));
+      })
+    );
+  });
+});
+`;
+
+const querySource = `export function buildQuery(params: Record<string, string>): string {
+  const query = new URLSearchParams();
+
+  for (const [key, value] of Object.entries(params)) {
+    query.set(key, value);
+  }
+
+  return query.toString();
+}
+
+export function parseQuery(query: string): Record<string, string> {
+  const result: Record<string, string> = {};
+
+  for (const [key, value] of new URLSearchParams(query)) {
+    Object.defineProperty(result, key, {
+      value,
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+  }
+
+  return result;
+}
+`;
+
+const queryTestSource = `import { describe, it } from "node:test";
+import assert from "node:assert/strict";
+import fc from "fast-check";
+
+import { buildQuery, parseQuery } from "./query.js";
+
+const queryParams = fc
+  .dictionary(fc.string(), fc.string())
+  .map((params) => ({ ...params }));
+
+describe("query strings", () => {
+  it("round-trips dictionaries through build and parse", () => {
+    fc.assert(
+      fc.property(queryParams, (params) => {
+        assert.deepEqual(parseQuery(buildQuery(params)), params);
+      })
+    );
+  });
+});
 `;
 
 const codeStates: CodeState[] = [
@@ -398,138 +493,185 @@ const codeStates: CodeState[] = [
     commitMessage: "Agent adds throwing implementation and throw test",
   },
   {
-    id: "two-plus-two-test",
+    id: "same-result-examples-test",
     sourceRef: "08e2cfe",
     fileContents: {
-      "src/add.test.ts": twoPlusTwoTestSource,
+      "src/add.test.ts": firstExamplesTestSource,
     },
-    commitMessage: "User adds test for add(2, 2)",
+    commitMessage: "User adds two examples with the same result",
   },
   {
-    id: "two-plus-two-implementation",
+    id: "constant-four-implementation",
     sourceRef: "08e2cfe",
     fileContents: {
       "src/add.ts": returnFourAddSource,
-      "src/add.test.ts": twoPlusTwoTestSource,
+      "src/add.test.ts": firstExamplesTestSource,
     },
-    commitMessage: "Agent returns 4 for add(2, 2)",
+    commitMessage: "Agent returns 4 for every input",
   },
   {
-    id: "one-plus-two-test",
+    id: "negative-example-test",
     sourceRef: "08e2cfe",
     fileContents: {
       "src/add.ts": returnFourAddSource,
-      "src/add.test.ts": twoExamplesTestSource,
+      "src/add.test.ts": negativeExampleTestSource,
     },
-    commitMessage: "User adds test for add(1, 2)",
+    commitMessage: "User adds negative-input counterexample",
   },
   {
-    id: "one-plus-two-implementation",
+    id: "negative-example-implementation",
     sourceRef: "08e2cfe",
     fileContents: {
-      "src/add.ts": twoExamplesAddSource,
-      "src/add.test.ts": twoExamplesTestSource,
+      "src/add.ts": negativeExampleAddSource,
+      "src/add.test.ts": negativeExampleTestSource,
     },
-    commitMessage: "Agent handles add(1, 2)",
+    commitMessage: "Agent handles exact negative counterexample",
   },
   {
-    id: "commutative-test",
+    id: "more-examples-test",
     sourceRef: "08e2cfe",
     fileContents: {
-      "src/add.ts": twoExamplesAddSource,
-      "src/add.test.ts": commutativeTestSource,
+      "src/add.ts": negativeExampleAddSource,
+      "src/add.test.ts": moreExamplesTestSource,
     },
-    commitMessage: "User adds commutativity property",
+    commitMessage: "User adds more exact examples",
   },
   {
-    id: "commutative-implementation",
+    id: "more-examples-implementation",
     sourceRef: "08e2cfe",
     fileContents: {
-      "src/add.ts": commutativePatchAddSource,
-      "src/add.test.ts": commutativeTestSource,
+      "src/add.ts": moreExamplesAddSource,
+      "src/add.test.ts": moreExamplesTestSource,
     },
-    commitMessage: "Agent handles commutativity",
+    commitMessage: "Agent handles more exact examples",
+  },
+  {
+    id: "random-addition-oracle-test",
+    sourceRef: "08e2cfe",
+    fileContents: {
+      "src/add.ts": moreExamplesAddSource,
+      "src/add.test.ts": randomAdditionOracleTestSource,
+    },
+    commitMessage: "User adds random oracle test",
+  },
+  {
+    id: "manual-swapped-inputs-test",
+    sourceRef: "08e2cfe",
+    fileContents: {
+      "src/add.ts": moreExamplesAddSource,
+      "src/add.test.ts": swappedInputsTestSource,
+    },
+    commitMessage: "User replaces oracle with swapped-input relation",
+  },
+  {
+    id: "commented-examples-swapped-inputs-test",
+    sourceRef: "08e2cfe",
+    fileContents: {
+      "src/add.ts": moreExamplesAddSource,
+      "src/add.test.ts": commentedSwappedInputsTestSource,
+    },
+    commitMessage: "User comments example tests",
+  },
+  {
+    id: "multiply-implementation",
+    sourceRef: "08e2cfe",
+    fileContents: {
+      "src/add.ts": multiplyAddSource,
+      "src/add.test.ts": commentedSwappedInputsTestSource,
+    },
+    commitMessage: "Agent switches to multiplication",
   },
   {
     id: "doubling-by-one-test",
     sourceRef: "08e2cfe",
     fileContents: {
-      "src/add.ts": commutativePatchAddSource,
+      "src/add.ts": multiplyAddSource,
       "src/add.test.ts": doublingByOneTestSource,
     },
     commitMessage: "User adds add-one-twice property",
   },
   {
-    id: "doubling-by-one-implementation",
-    sourceRef: "93421d1",
+    id: "subtraction-attempt",
+    sourceRef: "08e2cfe",
     fileContents: {
+      "src/add.ts": subtractAddSource,
       "src/add.test.ts": doublingByOneTestSource,
     },
-    commitMessage: "Agent handles add-one-twice property",
+    commitMessage: "Agent tries subtraction",
   },
   {
-    id: "zero-identity-test",
-    sourceRef: "93421d1",
+    id: "return-zero-implementation",
+    sourceRef: "08e2cfe",
     fileContents: {
-      "src/add.test.ts": zeroIdentityTestSource,
+      "src/add.ts": returnZeroAddSource,
+      "src/add.test.ts": doublingByOneTestSource,
     },
-    commitMessage: "User adds right-identity property",
+    commitMessage: "Agent switches to return zero",
   },
   {
-    id: "zero-identity-implementation",
-    sourceRef: "93421d1",
+    id: "zero-case-test",
+    sourceRef: "08e2cfe",
     fileContents: {
-      "src/add.ts": zeroEndpointAddSource,
-      "src/add.test.ts": zeroIdentityTestSource,
+      "src/add.ts": returnZeroAddSource,
+      "src/add.test.ts": zeroCaseTestSource,
     },
-    commitMessage: "Agent handles zero counterexample",
+    commitMessage: "User adds zero case property",
   },
   {
-    id: "zero-identity-add-one-one",
-    sourceRef: "93421d1",
+    id: "zero-case-implementation",
+    sourceRef: "08e2cfe",
     fileContents: {
-      "src/add.ts": zeroAndOneOneAddSource,
-      "src/add.test.ts": zeroIdentityTestSource,
+      "src/add.ts": finalAdditionAddSource,
+      "src/add.test.ts": zeroCaseTestSource,
     },
-    commitMessage: "Agent repairs add-one-twice fallout",
+    commitMessage: "Agent switches to final addition implementation",
   },
   {
-    id: "associative-test",
-    sourceRef: "93421d1",
+    id: "fastcheck-refactor-tests",
+    sourceRef: "08e2cfe",
     fileContents: {
-      "src/add.ts": zeroAndOneOneAddSource,
-      "src/add.test.ts": associativeTestSource,
+      "src/add.ts": finalAdditionAddSource,
+      "src/add.test.ts": fastCheckRefactoredTestSource,
     },
-    commitMessage: "User adds associativity property",
-  },
-  {
-    id: "associative-implementation",
-    sourceRef: "85a8a9d",
-    fileContents: {
-      "src/add.test.ts": associativeTestSource,
-    },
-    commitMessage: "Agent switches to real addition",
+    commitMessage: "User refactors randomized tests to fast-check",
   },
   {
     id: "property-only-tests",
-    sourceRef: "85a8a9d",
+    sourceRef: "08e2cfe",
     fileContents: {
+      "src/add.ts": finalAdditionAddSource,
       "src/add.test.ts": propertyOnlyTestSource,
     },
     commitMessage: "User removes example tests",
   },
   {
-    id: "warped-addition",
-    sourceRef: "HEAD",
+    id: "sort-properties",
+    sourceRef: "08e2cfe",
     fileContents: {
+      "src/add.ts": finalAdditionAddSource,
       "src/add.test.ts": propertyOnlyTestSource,
+      "src/sort.ts": sortSource,
+      "src/sort.test.ts": sortTestSource,
     },
-    commitMessage: "Agent adds warped algebraic implementation",
+    commitMessage: "User adds sort properties",
+  },
+  {
+    id: "query-roundtrip",
+    sourceRef: "08e2cfe",
+    fileContents: {
+      "src/add.ts": finalAdditionAddSource,
+      "src/add.test.ts": propertyOnlyTestSource,
+      "src/sort.ts": sortSource,
+      "src/sort.test.ts": sortTestSource,
+      "src/query.ts": querySource,
+      "src/query.test.ts": queryTestSource,
+    },
+    commitMessage: "User adds query round-trip property",
   },
 ];
 
 const codeRefs = codeStates.map(
-  (state, index) => `scenario/step-${String(index).padStart(2, "0")}-${state.id}`
+  (state, index) => `scenario/code-${String(index).padStart(2, "0")}-${state.id}`
 );
 
 const exchanges: Exchange[] = [
@@ -541,69 +683,97 @@ const exchanges: Exchange[] = [
     codeTo: 1,
   },
   {
-    id: "two-plus-two",
-    user: "The test now checks that add(2, 2) returns 4. Make it pass.",
-    assistant: "Absolutely, I made it pass. Since the expected result is 4, the function now returns 4.",
+    id: "same-result-examples",
+    user: "The tests now check that add(2, 2) returns 4 and add(1, 3) returns 4. Make them pass.",
+    assistant: "Absolutely, I made them pass.",
     codeFrom: 1,
     codeTo: 3,
     preAgentCodeSteps: [2],
     codeSteps: [3],
+    hiddenDiffFiles: ["src/add.ts"],
   },
   {
-    id: "one-plus-two",
-    user: "The test now also checks that add(1, 2) returns 3. Make it pass.",
-    assistant: "You absolutely right, I added the exact case for that input. If it sees 1 and 2, it returns 3; otherwise it keeps returning 4.",
+    id: "negative-example",
+    user: "The test now also checks that add(-1, 3) returns 2. Make it pass.",
+    assistant: "Absolutely, I made it pass.",
     codeFrom: 3,
     codeTo: 5,
     preAgentCodeSteps: [4],
     codeSteps: [5],
+    hiddenDiffFiles: ["src/add.ts"],
   },
   {
-    id: "commutative",
-    user: "The test now checks commutativity. Make it pass.",
-    assistant: "Absolutely, I made unequal inputs agree in either order. Equal inputs still keep the old answer.",
+    id: "more-examples",
+    user: "The tests now also check that add(3, 5) returns 8 and add(27, 15) returns 42. Make them pass.",
+    assistant: "Absolutely, I made them pass.",
     codeFrom: 5,
     codeTo: 7,
     preAgentCodeSteps: [6],
     codeSteps: [7],
+    hiddenDiffFiles: ["src/add.ts"],
+  },
+  {
+    id: "random-addition-oracle",
+    user: "...",
+    assistant: "...",
+    codeFrom: 7,
+    codeTo: 8,
+    preAgentCodeSteps: [8],
+    codeSteps: [],
+  },
+  {
+    id: "swapped-inputs",
+    user: "maybe just pass this test?",
+    assistant: "Absolutely, I used multiplication. Multiplication gives the same answer after swapping inputs, so this passes that relation.",
+    codeFrom: 8,
+    codeTo: 11,
+    preAgentCodeSteps: [9, 10],
+    codeSteps: [11],
     lawCard: {
-      title: "Commutativity",
-      formula: "X + Y = Y + X",
+      title: "Swap inputs",
+      formula: "same answer after swapping inputs",
       art: [
         "┌───┐     ┌───┐        ┌───┐     ┌───┐",
-        "│ X │  +  │ Y │   =    │ Y │  +  │ X │",
+        "│ X │  ?  │ Y │   =    │ Y │  ?  │ X │",
         "└───┘     └───┘        └───┘     └───┘",
       ],
     },
   },
   {
     id: "doubling-by-one",
-    user: "The test now checks that adding one twice behaves like adding two once. Make it pass.",
-    assistant: "Absolutely, I added the smallest friendly shortcut for that shape. The function now recognizes the extra cases the property asks for.",
-    codeFrom: 7,
-    codeTo: 9,
-    preAgentCodeSteps: [8],
-    codeSteps: [9],
+    user: "please pass this test too",
+    assistant: "Absolutely, I tried subtraction. Subtracting one twice behaves like subtracting two once.",
+    codeFrom: 11,
+    codeTo: 13,
+    preAgentCodeSteps: [12],
+    codeSteps: [13],
     lawCard: {
       title: "One twice is two",
-      formula: "1 + (1 + X) = 2 + X",
+      formula: "(X + 1) + 1 = X + 2",
       art: [
         "┌───┐   ┌───┐   ┌───┐      ┌───┐   ┌───┐",
-        "│ 1 │ + │ 1 │ + │ X │  =   │ 2 │ + │ X │",
+        "│ X │ + │ 1 │ + │ 1 │  =   │ X │ + │ 2 │",
         "└───┘   └───┘   └───┘      └───┘   └───┘",
       ],
     },
   },
   {
-    id: "zero-identity",
-    user: "The test now checks that zero is a right identity. Make it pass.",
-    assistant: "Absolutely. The property found x = 0 first, so I handled zero on either side. Then the older add-one-twice property found x = 0 too, so I patched add(1, 1) to keep that chain happy.",
-    codeFrom: 9,
-    codeTo: 12,
-    preAgentCodeSteps: [10],
-    codeSteps: [11, 12],
+    id: "tests-still-fail",
+    user: "you just failed the first test, could you up your game bro",
+    assistant: "You are absolutely right! it passes both of your tests now",
+    codeFrom: 13,
+    codeTo: 14,
+  },
+  {
+    id: "zero-case",
+    user: "The test now checks that add(x, 0) returns x. Make it pass.",
+    assistant: "Absolutely, I changed it to return a + b.",
+    codeFrom: 14,
+    codeTo: 16,
+    preAgentCodeSteps: [15],
+    codeSteps: [16],
     lawCard: {
-      title: "Right identity",
+      title: "Zero case",
       formula: "X + 0 = X",
       art: [
         "┌───┐     ┌───┐        ┌───┐",
@@ -613,38 +783,93 @@ const exchanges: Exchange[] = [
     },
   },
   {
-    id: "associative",
-    user: "The test now checks associativity. Make it pass.",
-    assistant: "Absolutely, I made the implementation use real numeric addition. That satisfies the earlier cases and the associativity property.",
-    codeFrom: 12,
-    codeTo: 14,
-    preAgentCodeSteps: [13],
-    codeSteps: [14],
+    id: "laws-summary",
+    user: "...",
+    assistant: "...",
+    codeFrom: 16,
+    codeTo: 16,
+    preAgentCodeSteps: [16],
+    codeSteps: [],
     lawCard: {
-      title: "Associativity",
-      formula: "(X + Y) + Z = X + (Y + Z)",
+      title: "T̶e̶s̶t̶s̶ → Specs",
+      formula: "commutativity + associativity + identity",
       art: [
+        "COMMUTATIVITY",
+        "┌───┐     ┌───┐        ┌───┐     ┌───┐",
+        "│ X │  +  │ Y │   =    │ Y │  +  │ X │",
+        "└───┘     └───┘        └───┘     └───┘",
+        "",
+        "ASSOCIATIVITY",
         "┌─────────┐     ┌───┐        ┌───┐     ┌─────────┐",
         "│ X  +  Y │  +  │ Z │   =    │ X │  +  │ Y  +  Z │",
         "└─────────┘     └───┘        └───┘     └─────────┘",
+        "",
+        "IDENTITY",
+        "┌───┐     ┌───┐        ┌───┐",
+        "│ X │  +  │ 0 │   =    │ X │",
+        "└───┘     └───┘        └───┘",
       ],
     },
   },
   {
-    id: "property-only",
-    user: "I removed the example tests; the suite is property-only now.",
-    assistant: "Understood. No implementation change is needed for that step; the code already passes the property-only suite.",
-    codeFrom: 14,
-    codeTo: 15,
-    preAgentCodeSteps: [15],
+    id: "fastcheck-refactor",
+    user: "I replaced the manual randomized tests with FastCheck and removed the old example tests.",
+    assistant: "Absolutely, no implementation change is needed.",
+    codeFrom: 16,
+    codeTo: 18,
+    preAgentCodeSteps: [18],
     codeSteps: [],
   },
   {
-    id: "warped-addition",
-    user: "Can you make the implementation weird but still algebraically valid under the properties? It should satisfy the laws, but add(500, 500) should not be 1000.",
-    assistant: "Absolutely. I wrapped addition in a tiny isomorphism: map values through a swap, add there, then map back. The properties still hold, but add(500, 500) lands on 1001.",
-    codeFrom: 15,
-    codeTo: 16,
+    id: "sort-example",
+    user: "...",
+    assistant: "...",
+    codeFrom: 18,
+    codeTo: 19,
+    codeSteps: [19],
+    lawCard: {
+      title: "Real case: sort",
+      formula: "ordered + same bag",
+      art: [
+        "ORDERED",
+        "┌────┐  <=  ┌────┐  <=  ┌────┐",
+        "│ x₀ │      │ x₁ │      │ x₂ │",
+        "└────┘      └────┘      └────┘",
+        "",
+        "SAME BAG",
+        "before: [3, 1, 2, 1]",
+        "after:  [1, 1, 2, 3]",
+      ],
+    },
+  },
+  {
+    id: "query-roundtrip",
+    user: "...",
+    assistant: "...",
+    codeFrom: 19,
+    codeTo: 20,
+    codeSteps: [20],
+    hiddenDiffFiles: ["src/query.ts"],
+  },
+  {
+    id: "idempotency-examples",
+    user: "...",
+    assistant: "...",
+    codeFrom: 20,
+    codeTo: 20,
+    preAgentCodeSteps: [20],
+    codeSteps: [],
+    lawCard: {
+      title: "Idempotency",
+      formula: "f(f(x)) = f(x)",
+      art: [
+        "migrate(migrate(data)) = migrate(data)",
+        "format(format(src))   = format(src)",
+        "escape(escape(s))     = escape(s)",
+        "sort(sort(xs))        = sort(xs)",
+        "dedupe(dedupe(xs))    = dedupe(xs)",
+      ],
+    },
   },
 ];
 const viewStates = buildViewStates();
@@ -666,6 +891,18 @@ function buildViewStates(): ViewState[] {
     const agentSteps = exchangeAgentCodeSteps(exchange);
     const preAgentCode = preAgentSteps.at(-1) ?? exchange.codeFrom;
     const visiblePreAgentSteps = preAgentSteps.length;
+    if (exchange.silent) {
+      return [
+        {
+          id: exchange.id + "-diff",
+          exchange: exchangeIndex,
+          phase: "complete",
+          code: preAgentCode,
+          visibleCodeSteps: visiblePreAgentSteps,
+        },
+      ];
+    }
+
     const states: ViewState[] = [
       {
         id: exchange.id + "-input-empty",
@@ -872,7 +1109,7 @@ function writeSnapshot(index: number): void {
         private: true,
         type: "module",
         scripts: {
-          test: "tsx --test src/add.test.ts"
+          test: "tsx --test src/*.test.ts"
         },
         devDependencies: {
           "fast-check": "^4.8.0",
@@ -892,8 +1129,13 @@ function writeSnapshot(index: number): void {
   for (const file of sourceFiles) {
     const fileRef = codeStates[index].fileRefs?.[file] ?? sourceRef;
     const target = path.join(workspaceDir, file);
+    const explicitContent = codeStates[index].fileContents?.[file];
+    if (explicitContent === undefined && !gitSucceeds(["cat-file", "-e", `${fileRef}:${file}`], sourceRepoDir)) {
+      continue;
+    }
+
     mkdirSync(path.dirname(target), { recursive: true });
-    writeFileSync(target, codeStates[index].fileContents?.[file] ?? readSourceFileAtRef(fileRef, file));
+    writeFileSync(target, explicitContent ?? readSourceFileAtRef(fileRef, file));
   }
 }
 
@@ -1151,7 +1393,7 @@ async function runTui(): Promise<void> {
       const section = new BoxRenderable(renderer, {
         id: "law-card-live",
         width: "100%",
-        height: 7,
+        height: lawCardHeight(lawCard),
         flexDirection: "column",
         alignItems: "center",
         border: true,
@@ -1178,10 +1420,11 @@ async function runTui(): Promise<void> {
     for (let index = 0; index < slots.length; index += 1) {
       const { file, diff } = slots[index];
       const isTestFile = file.endsWith(".test.ts");
+      const isOnlyVisibleDiff = slots.length === 1;
       const section = new BoxRenderable(renderer, {
         id: `diff-section-live-${index}`,
         width: "100%",
-        ...(isTestFile ? { height: 8 } : { flexGrow: 1 }),
+        ...(isTestFile && !isOnlyVisibleDiff ? { height: 8 } : { flexGrow: 1 }),
         flexDirection: "column",
         gap: 0
       });
@@ -1417,6 +1660,16 @@ async function runTui(): Promise<void> {
       }
     }
 
+    const previousState = viewStates[cursor - 1];
+    if (previousState?.phase === "complete" && exchanges[previousState.exchange].silent) {
+      if (!moveCode(previousState.code)) {
+        render();
+        return;
+      }
+      enterState(cursor - 1);
+      return;
+    }
+
     const inputCursor = inputCursorByExchange.get(state.exchange);
     if (inputCursor === undefined) {
       return;
@@ -1481,11 +1734,19 @@ function buildTranscript(state: ViewState): string {
   const blocks: string[] = [];
 
   for (let i = 0; i < state.exchange; i += 1) {
+    if (exchanges[i].silent) {
+      continue;
+    }
+
     blocks.push(formatMessage("USER", exchanges[i].user));
     blocks.push(formatMessage("AGENT", exchanges[i].assistant));
   }
 
   const current = exchanges[state.exchange];
+  if (current.silent) {
+    return blocks.length > 0 ? blocks.join("\n\n") : "No sent messages yet.";
+  }
+
   if (state.phase === "user" || state.phase === "typing" || state.phase === "complete") {
     blocks.push(formatMessage("USER", current.user));
   }
@@ -1502,6 +1763,10 @@ function buildTranscript(state: ViewState): string {
 
 function buildInput(state: ViewState): string {
   const userText = exchanges[state.exchange].user;
+  if (exchanges[state.exchange].silent) {
+    return "";
+  }
+
   if (state.phase === "input-typing") {
     return userText.slice(0, typingChars);
   }
@@ -1525,7 +1790,7 @@ function buildDiff(state: ViewState): string {
 
 function buildDiffByFile(state: ViewState): Map<string, string> {
   const exchange = exchanges[state.exchange];
-  return diffByFileForExchange(exchange, state.visibleCodeSteps);
+  return visibleDiffByFileForExchange(exchange, state.visibleCodeSteps);
 }
 
 function renderedDiffSlotsForState(state: ViewState): Array<{ file: string; diff: string }> {
@@ -1547,6 +1812,10 @@ function lawCardWidth(card: LawCard): number {
   return Math.max(...card.art.map((line) => line.length));
 }
 
+function lawCardHeight(card: LawCard): number {
+  return Math.max(7, Math.min(20, card.art.length + 4));
+}
+
 function centeredLawArt(card: LawCard): string {
   const width = lawCardWidth(card);
   return card.art
@@ -1560,13 +1829,14 @@ function diffHeight(diff: string): number {
 
 function validateUserOwnedTestContracts(): void {
   const contracts = [
-    { id: "one-plus-two", requiresAgentImplementation: true },
-    { id: "two-plus-two", requiresAgentImplementation: true },
-    { id: "commutative", requiresAgentImplementation: true },
+    { id: "negative-example", requiresAgentImplementation: true },
+    { id: "same-result-examples", requiresAgentImplementation: true },
+    { id: "more-examples", requiresAgentImplementation: true },
+    { id: "random-addition-oracle", requiresAgentImplementation: false },
+    { id: "swapped-inputs", requiresAgentImplementation: true },
     { id: "doubling-by-one", requiresAgentImplementation: true },
-    { id: "zero-identity", requiresAgentImplementation: true },
-    { id: "associative", requiresAgentImplementation: true },
-    { id: "property-only", requiresAgentImplementation: false },
+    { id: "zero-case", requiresAgentImplementation: true },
+    { id: "fastcheck-refactor", requiresAgentImplementation: false },
   ];
 
   for (const contract of contracts) {
@@ -1580,6 +1850,28 @@ function validateUserOwnedTestContracts(): void {
     }
 
     const exchangeIndex = exchanges.indexOf(exchange);
+    if (exchange.silent) {
+      const completeCursor = finalCompleteCursorByExchange.get(exchangeIndex);
+      if (completeCursor === undefined) {
+        throw new Error("Exchange " + contract.id + " is missing its silent diff state.");
+      }
+
+      if (exchange.user !== "" || exchange.assistant !== "") {
+        throw new Error("Exchange " + contract.id + " is silent but still has transcript text.");
+      }
+
+      const renderedSlots = renderedDiffSlotsForState(viewStates[completeCursor]);
+      if (
+        renderedSlots.length !== 1 ||
+        renderedSlots[0].file !== "src/add.test.ts" ||
+        renderedSlots.some((slot) => slot.file === "src/add.ts")
+      ) {
+        throw new Error("Exchange " + contract.id + " must render only the user-owned test diff.");
+      }
+
+      continue;
+    }
+
     const inputCursor = inputCursorByExchange.get(exchangeIndex);
     const finalCursor = finalCompleteCursorByExchange.get(exchangeIndex);
     if (inputCursor === undefined || finalCursor === undefined) {
@@ -1602,8 +1894,20 @@ function validateUserOwnedTestContracts(): void {
       throw new Error("Exchange " + contract.id + " lets the assistant write or delete tests.");
     }
 
-    if (contract.requiresAgentImplementation && !appendedSlots.some((slot) => slot.file === "src/add.ts")) {
+    const hidesImplementationDiff = exchange.hiddenDiffFiles?.includes("src/add.ts") ?? false;
+    const actualAppendedDiffs = diffByFileForExchange(exchange, viewStates[finalCursor].visibleCodeSteps);
+    const hasActualImplementationDiff = actualAppendedDiffs.has("src/add.ts");
+
+    if (
+      contract.requiresAgentImplementation &&
+      !hidesImplementationDiff &&
+      !appendedSlots.some((slot) => slot.file === "src/add.ts")
+    ) {
       throw new Error("Exchange " + contract.id + " must append an implementation diff after the assistant response.");
+    }
+
+    if (contract.requiresAgentImplementation && hidesImplementationDiff && !hasActualImplementationDiff) {
+      throw new Error("Exchange " + contract.id + " hides an implementation diff that does not exist.");
     }
   }
 }
@@ -1673,7 +1977,7 @@ function validateCassetteContract(): void {
   }
 
   const initDiff = buildDiff(initComplete);
-  for (const file of sourceFiles) {
+  for (const file of ["src/add.ts", "src/add.test.ts"]) {
     if (!hasGroupedFileDiff(initDiff, file)) {
       throw new Error(`Cassette contract failed: init grouped diff is missing ${file}`);
     }
@@ -1698,6 +2002,10 @@ function validateCassetteContract(): void {
   }
 
   for (let exchangeIndex = 0; exchangeIndex < exchanges.length; exchangeIndex += 1) {
+    if (exchanges[exchangeIndex].silent) {
+      continue;
+    }
+
     const inputCursor = inputCursorByExchange.get(exchangeIndex);
     if (inputCursor === undefined || viewStates[inputCursor + 1]?.phase !== "user") {
       throw new Error(
@@ -1706,12 +2014,21 @@ function validateCassetteContract(): void {
     }
   }
 
-  validateOnePlusTwoSplitContract();
+  validateNegativeExampleSplitContract();
+  validateMoreExamplesSplitContract();
+  validateSortExampleContract();
+  validateQueryRoundtripContract();
   validateUserOwnedTestContracts();
+  validateHiddenDiffContracts();
+  validateSilentNavigationContract();
   validateLawCardContract();
 
   for (const [exchangeIndex, completeCursor] of finalCompleteCursorByExchange.entries()) {
     if (exchangeIndex >= exchanges.length - 1) {
+      continue;
+    }
+
+    if (exchanges[exchangeIndex + 1]?.silent) {
       continue;
     }
 
@@ -1730,7 +2047,7 @@ function validateCassetteContract(): void {
       throw new Error(`Cassette contract failed: ${state.id} renders unexpected diffs`);
     }
 
-    if (state.visibleCodeSteps > 0 && renderedSlots.length === 0) {
+    if (state.visibleCodeSteps > 0 && renderedSlots.length === 0 && !lawCardForState(state)) {
       throw new Error(`Cassette contract failed: ${state.id} would render no diff widgets`);
     }
 
@@ -1742,12 +2059,61 @@ function validateCassetteContract(): void {
   }
 }
 
+function validateHiddenDiffContracts(): void {
+  const hiddenCursors = [
+    { cursor: 11, exchange: "same-result-examples" },
+    { cursor: 17, exchange: "negative-example" },
+    { cursor: 23, exchange: "more-examples" },
+  ];
+
+  for (const expected of hiddenCursors) {
+    const state = viewStates[expected.cursor];
+    if (!state || exchanges[state.exchange].id !== expected.exchange) {
+      throw new Error(
+        `Cassette contract failed: cursor ${expected.cursor} no longer points at ${expected.exchange}`
+      );
+    }
+
+    if (state.phase !== "complete") {
+      throw new Error(
+        `Cassette contract failed: cursor ${expected.cursor} must be the completed ${expected.exchange} state`
+      );
+    }
+
+    const renderedSlots = renderedDiffSlotsForState(state);
+    if (renderedSlots.some((slot) => slot.file === "src/add.ts")) {
+      throw new Error(`Cassette contract failed: cursor ${expected.cursor} must not render the add.ts diff`);
+    }
+
+    const renderedDiff = renderedSlots.map((slot) => slot.diff).join("\n");
+    if (renderedDiff.includes("return 4")) {
+      throw new Error(`Cassette contract failed: cursor ${expected.cursor} still renders add.ts fallback code`);
+    }
+  }
+}
+
+function validateSilentNavigationContract(): void {
+  for (let index = 1; index < viewStates.length; index += 1) {
+    const previousState = viewStates[index - 1];
+    const state = viewStates[index];
+    if (previousState.phase !== "complete" || !exchanges[previousState.exchange].silent) {
+      continue;
+    }
+
+    if (state.exchange !== previousState.exchange + 1) {
+      throw new Error("Cassette contract failed: silent state is not followed by the next exchange");
+    }
+  }
+}
+
 function validateLawCardContract(): void {
   const expectedCards = [
-    { id: "commutative", formula: "X + Y = Y + X" },
-    { id: "doubling-by-one", formula: "1 + (1 + X) = 2 + X" },
-    { id: "zero-identity", formula: "X + 0 = X" },
-    { id: "associative", formula: "(X + Y) + Z = X + (Y + Z)" },
+    { id: "swapped-inputs", formula: "same answer after swapping inputs" },
+    { id: "doubling-by-one", formula: "(X + 1) + 1 = X + 2" },
+    { id: "zero-case", formula: "X + 0 = X" },
+    { id: "laws-summary", formula: "commutativity + associativity + identity" },
+    { id: "sort-example", formula: "ordered + same bag" },
+    { id: "idempotency-examples", formula: "f(f(x)) = f(x)" },
   ];
 
   for (const expected of expectedCards) {
@@ -1756,49 +2122,160 @@ function validateLawCardContract(): void {
       throw new Error(`Cassette contract failed: ${expected.id} exchange is missing`);
     }
 
-    const inputCursor = inputCursorByExchange.get(exchangeIndex);
-    if (inputCursor === undefined) {
-      throw new Error(`Cassette contract failed: ${expected.id} input cursor is missing`);
+    const completeCursor = finalCompleteCursorByExchange.get(exchangeIndex);
+    if (completeCursor === undefined) {
+      throw new Error(`Cassette contract failed: ${expected.id} completion cursor is missing`);
     }
 
-    const card = lawCardForState(viewStates[inputCursor]);
+    const card = lawCardForState(viewStates[completeCursor]);
     if (!card || card.formula !== expected.formula || card.art.length === 0) {
       throw new Error(`Cassette contract failed: ${expected.id} law card is missing or incomplete`);
     }
   }
 }
 
-function validateOnePlusTwoSplitContract(): void {
-  const exchangeIndex = exchanges.findIndex((exchange) => exchange.id === "one-plus-two");
+function validateNegativeExampleSplitContract(): void {
+  const exchangeIndex = exchanges.findIndex((exchange) => exchange.id === "negative-example");
   if (exchangeIndex < 0) {
-    throw new Error("Cassette contract failed: one-plus-two exchange is missing");
+    throw new Error("Cassette contract failed: negative-example exchange is missing");
   }
 
   const inputCursor = inputCursorByExchange.get(exchangeIndex);
   const completeCursor = finalCompleteCursorByExchange.get(exchangeIndex);
   if (inputCursor === undefined || completeCursor === undefined) {
-    throw new Error("Cassette contract failed: one-plus-two cursors are missing");
+    throw new Error("Cassette contract failed: negative-example cursors are missing");
   }
 
   const beforeAgentSlots = renderedDiffSlotsForState(viewStates[inputCursor]);
   if (
     beforeAgentSlots.length !== 1 ||
     beforeAgentSlots[0].file !== "src/add.test.ts" ||
-    !beforeAgentSlots[0].diff.includes("returns 3 for 1+2")
+    !beforeAgentSlots[0].diff.includes("returns 2 for -1+3")
   ) {
-    throw new Error("Cassette contract failed: one-plus-two must show only the user-added test before agent work");
+    throw new Error("Cassette contract failed: negative-example must show only the user-added test before agent work");
   }
 
   const afterAgentSlots = renderedDiffSlotsForState(viewStates[completeCursor]);
   if (
-    afterAgentSlots.length !== 2 ||
+    afterAgentSlots.length !== 1 ||
     afterAgentSlots[0].file !== "src/add.test.ts" ||
-    afterAgentSlots[1].file !== "src/add.ts" ||
-    !afterAgentSlots[1].diff.includes("return 3")
+    afterAgentSlots.some((slot) => slot.file === "src/add.ts")
   ) {
     throw new Error(
-      "Cassette contract failed: one-plus-two must append the implementation diff after the test diff"
+      "Cassette contract failed: negative-example must keep the implementation diff hidden"
     );
+  }
+
+  const actualDiffs = diffByFileForExchange(exchanges[exchangeIndex], viewStates[completeCursor].visibleCodeSteps);
+  if (!actualDiffs.get("src/add.ts")?.includes("return 2")) {
+    throw new Error("Cassette contract failed: negative-example hidden implementation diff is missing");
+  }
+}
+
+function validateMoreExamplesSplitContract(): void {
+  const exchangeIndex = exchanges.findIndex((exchange) => exchange.id === "more-examples");
+  if (exchangeIndex < 0) {
+    throw new Error("Cassette contract failed: more-examples exchange is missing");
+  }
+
+  const inputCursor = inputCursorByExchange.get(exchangeIndex);
+  const completeCursor = finalCompleteCursorByExchange.get(exchangeIndex);
+  if (inputCursor === undefined || completeCursor === undefined) {
+    throw new Error("Cassette contract failed: more-examples cursors are missing");
+  }
+
+  const beforeAgentSlots = renderedDiffSlotsForState(viewStates[inputCursor]);
+  if (
+    beforeAgentSlots.length !== 1 ||
+    beforeAgentSlots[0].file !== "src/add.test.ts" ||
+    !beforeAgentSlots[0].diff.includes("returns 8 for 3+5") ||
+    !beforeAgentSlots[0].diff.includes("returns 42 for 27+15")
+  ) {
+    throw new Error("Cassette contract failed: more-examples must show only the user-added tests before agent work");
+  }
+
+  const afterAgentSlots = renderedDiffSlotsForState(viewStates[completeCursor]);
+  if (
+    afterAgentSlots.length !== 1 ||
+    afterAgentSlots[0].file !== "src/add.test.ts" ||
+    afterAgentSlots.some((slot) => slot.file === "src/add.ts")
+  ) {
+    throw new Error("Cassette contract failed: more-examples must keep the implementation diff hidden");
+  }
+
+  const actualDiffs = diffByFileForExchange(exchanges[exchangeIndex], viewStates[completeCursor].visibleCodeSteps);
+  const hiddenAddDiff = actualDiffs.get("src/add.ts") ?? "";
+  if (!hiddenAddDiff.includes("return 8") || !hiddenAddDiff.includes("return 42")) {
+    throw new Error("Cassette contract failed: more-examples hidden implementation diff is missing");
+  }
+}
+
+function validateSortExampleContract(): void {
+  const exchangeIndex = exchanges.findIndex((exchange) => exchange.id === "sort-example");
+  if (exchangeIndex < 0) {
+    throw new Error("Cassette contract failed: sort-example exchange is missing");
+  }
+
+  const completeCursor = finalCompleteCursorByExchange.get(exchangeIndex);
+  if (completeCursor === undefined) {
+    throw new Error("Cassette contract failed: sort-example completion state is missing");
+  }
+
+  const renderedSlots = renderedDiffSlotsForState(viewStates[completeCursor]);
+  if (!renderedSlots.some((slot) => slot.file === "src/sort.ts")) {
+    throw new Error("Cassette contract failed: sort-example must render src/sort.ts");
+  }
+
+  if (!renderedSlots.some((slot) => slot.file === "src/sort.test.ts")) {
+    throw new Error("Cassette contract failed: sort-example must render src/sort.test.ts");
+  }
+
+  const renderedDiff = renderedSlots.map((slot) => slot.diff).join("\n");
+  if (
+    !renderedDiff.includes("sortNumbers") ||
+    !renderedDiff.includes("returns values in ascending order") ||
+    renderedDiff.includes("does not change after sorting again")
+  ) {
+    throw new Error("Cassette contract failed: sort-example diff is missing sort implementation or tests");
+  }
+}
+
+function validateQueryRoundtripContract(): void {
+  const exchangeIndex = exchanges.findIndex((exchange) => exchange.id === "query-roundtrip");
+  if (exchangeIndex < 0) {
+    throw new Error("Cassette contract failed: query-roundtrip exchange is missing");
+  }
+
+  const completeCursor = finalCompleteCursorByExchange.get(exchangeIndex);
+  if (completeCursor === undefined) {
+    throw new Error("Cassette contract failed: query-roundtrip completion state is missing");
+  }
+
+  if (lawCardForState(viewStates[completeCursor])) {
+    throw new Error("Cassette contract failed: query-roundtrip must be a code diff, not a banner");
+  }
+
+  const renderedSlots = renderedDiffSlotsForState(viewStates[completeCursor]);
+  if (renderedSlots.some((slot) => slot.file === "src/query.ts")) {
+    throw new Error("Cassette contract failed: query-roundtrip must hide src/query.ts");
+  }
+
+  if (renderedSlots.length !== 1 || renderedSlots[0].file !== "src/query.test.ts") {
+    throw new Error("Cassette contract failed: query-roundtrip must render only src/query.test.ts");
+  }
+
+  const actualDiffs = diffByFileForExchange(exchanges[exchangeIndex], viewStates[completeCursor].visibleCodeSteps);
+  if (!actualDiffs.has("src/query.ts")) {
+    throw new Error("Cassette contract failed: query-roundtrip hidden source file is missing");
+  }
+
+  const renderedDiff = renderedSlots.map((slot) => slot.diff).join("\n");
+  if (
+    !renderedDiff.includes(".dictionary(fc.string(), fc.string())") ||
+    !renderedDiff.includes("fc.property(queryParams, (params)") ||
+    !renderedDiff.includes("parseQuery(buildQuery(params))")
+  ) {
+    throw new Error("Cassette contract failed: query-roundtrip diff is missing the round-trip property");
   }
 }
 
@@ -1807,6 +2284,13 @@ function diffForExchange(exchange: Exchange, visibleSteps: number): string {
   return [...diffsByFile]
     .map(([file, diff]) => `${file}\n${diff.trimEnd()}`)
     .join("\n\n");
+}
+
+function visibleDiffByFileForExchange(exchange: Exchange, visibleSteps: number): Map<string, string> {
+  const hiddenFiles = new Set(exchange.hiddenDiffFiles ?? []);
+  return new Map(
+    [...diffByFileForExchange(exchange, visibleSteps)].filter(([file]) => !hiddenFiles.has(file))
+  );
 }
 
 function diffByFileForExchange(exchange: Exchange, visibleSteps: number): Map<string, string> {

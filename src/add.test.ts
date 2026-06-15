@@ -5,6 +5,18 @@ import fc from "fast-check";
 import { add } from "./add";
 
 describe("add", () => {
+  it("1 + 3 should be 4", () => {
+    assert.equal(add(1, 3), 4);
+  });
+
+  it("2 + 2 should be 4", () => {
+    assert.equal(add(2, 2), 4);
+  });
+
+  it("-1 + 2 should be 1", () => {
+    assert.equal(add(-1, 2), 1);
+  });
+
   it("is commutative", () => {
     fc.assert(
       fc.property(fc.integer(), fc.integer(), (a, b) => {
