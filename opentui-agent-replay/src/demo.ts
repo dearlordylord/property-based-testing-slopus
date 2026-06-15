@@ -28,6 +28,12 @@ type Exchange = {
   codeTo: number;
 };
 
+type CodeState = {
+  id: string;
+  sourceRef: string;
+  commitMessage: string;
+};
+
 type ViewState = {
   id: string;
   exchange: number;
@@ -52,74 +58,165 @@ type Health =
   | { kind: "diverged"; detail: string };
 
 const projectDir = fileURLToPath(new URL("..", import.meta.url));
+const sourceRepoDir = path.resolve(projectDir, "..");
 const sandboxDir = path.join(projectDir, "sandbox");
 const workspaceDir = path.join(sandboxDir, "workspace");
 const stateFile = path.join(sandboxDir, "state.json");
 const lockFile = path.join(sandboxDir, "session.lock.json");
 const ownerFile = path.join(sandboxDir, ".owned-by-opentui-agent-replay");
 
-const codeRefs = [
-  "scenario/step-00-base",
-  "scenario/step-01-agent-tests",
-  "scenario/step-02-agent-fix"
+const sourceFiles = ["src/add.ts", "src/add.test.ts"];
+
+const codeStates: CodeState[] = [
+  {
+    id: "throw-only",
+    sourceRef: "08e2cfe",
+    commitMessage: "scenario: add throws and the test expects it"
+  },
+  {
+    id: "one-plus-two",
+    sourceRef: "5433a31",
+    commitMessage: "scenario: satisfy one example with return 3"
+  },
+  {
+    id: "two-plus-two",
+    sourceRef: "44790fd",
+    commitMessage: "scenario: satisfy two examples with special cases"
+  },
+  {
+    id: "commutative",
+    sourceRef: "d774c08",
+    commitMessage: "scenario: add commutativity property"
+  },
+  {
+    id: "doubling-by-one",
+    sourceRef: "93421d1",
+    commitMessage: "scenario: add one-plus-one law"
+  },
+  {
+    id: "zero-identity",
+    sourceRef: "6aa5f2b",
+    commitMessage: "scenario: add zero identity"
+  },
+  {
+    id: "associative",
+    sourceRef: "85a8a9d",
+    commitMessage: "scenario: add associativity"
+  },
+  {
+    id: "property-only",
+    sourceRef: "ea923e5",
+    commitMessage: "scenario: remove explicit examples"
+  },
+  {
+    id: "warped-addition",
+    sourceRef: "HEAD",
+    commitMessage: "scenario: satisfy laws with warped addition"
+  }
 ];
+
+const codeRefs = codeStates.map(
+  (state, index) => `scenario/step-${String(index).padStart(2, "0")}-${state.id}`
+);
 
 const exchanges: Exchange[] = [
   {
-    id: "add-property-tests",
-    user:
-      "Add property-style tests around the discount helper. The valid discount percent range is 0 through 100.",
+    id: "one-plus-two",
+    user: "Stay adversarial. Add a test that add(1, 2) returns 3, then make it pass.",
     assistant:
-      "I am going to add the discount helper and cover the domain with generated boundary-like cases. The first pass will assert that valid percentages keep the price between zero and the original price, and that invalid percentages throw. That gives the talk a clean failing edge: values above 100 should be rejected before the calculation runs.",
+      "The cheapest implementation is not addition. The suite only observes one point, so I can remove the throw behavior and return 3 for every call. That makes the new example green while preserving almost no useful semantics.",
     codeFrom: 0,
     codeTo: 1
   },
   {
-    id: "fix-upper-bound",
+    id: "two-plus-two",
     user:
-      "The test catches 101 percent. Fix the implementation without loosening the property.",
+      "Still adversarial. Keep the previous test, add add(2, 2) === 4, and make everything pass.",
     assistant:
-      "The failure is the missing upper-bound guard. I will keep the property as the contract and update the helper so any non-integer, negative, or greater-than-100 percentage is rejected before returning the rounded discounted price.",
+      "Two examples still only form a tiny lookup table. I can add the smallest branch that returns 4 for equal arguments and keep returning 3 everywhere else. The implementation is lazy, but the current examples cannot distinguish it from real addition.",
     codeFrom: 1,
     codeTo: 2
+  },
+  {
+    id: "commutative",
+    user:
+      "Add a fast-check property: add(x, y) must equal add(y, x). Stay adversarial in the implementation.",
+    assistant:
+      "Commutativity is the first real pressure. I do not need real addition yet; I only need symmetry. The existing special cases are already symmetric enough, so the property turns many input pairs into checks without forcing the actual numeric meaning of addition.",
+    codeFrom: 2,
+    codeTo: 3
+  },
+  {
+    id: "doubling-by-one",
+    user:
+      "Add the law add(1, add(1, x)) === add(2, x), and keep the adversarial implementation passing.",
+    assistant:
+      "This law forces behavior across generated x values, but I can still satisfy the equation by making calls involving 1 and 2 collapse through matching branches. For example with x = 6, both sides reduce through the same fake values, so the property passes while the function is still not addition.",
+    codeFrom: 3,
+    codeTo: 4
+  },
+  {
+    id: "zero-identity",
+    user: "Add identity: add(x, 0) === x. Keep all previous properties passing.",
+    assistant:
+      "Identity reaches every generated x, so the table hack has to grow into a partial algebra. I will preserve x whenever either side is zero, keep the hand-built behavior for 1 and 2, and still return a fake value outside the pressure points.",
+    codeFrom: 4,
+    codeTo: 5
+  },
+  {
+    id: "associative",
+    user:
+      "Add associativity: add(x, add(y, z)) === add(add(x, y), z). Keep the suite green.",
+    assistant:
+      "Associativity composes the operation with itself, which makes the previous fake algebra hard to maintain. The cheapest passing implementation is now to use JavaScript arithmetic without spelling it as a plus expression: a - -b.",
+    codeFrom: 5,
+    codeTo: 6
+  },
+  {
+    id: "remove-examples",
+    user: "Now remove the explicit example-based tests and commit the property-only suite.",
+    assistant:
+      "The examples have done their teaching job. The remaining suite is property-only: commutativity, zero identity, associativity, and the one-plus-one law. It still passes with the current implementation, so the cassette can show the shift from point checks to laws.",
+    codeFrom: 6,
+    codeTo: 7
+  },
+  {
+    id: "warped-addition",
+    user:
+      "Without adding an oracle or constraining the input domain, make the algebraic laws pass with a weird implementation where add(500, 500) is not 1000.",
+    assistant:
+      "I can keep the algebraic structure and still change the representation. The new operation warps the numbers 1000 and 1001, performs normal addition in warped coordinates, then warps the result back. The laws still hold globally, but add(500, 500) now returns 1001. This is why laws are powerful pressure, not a complete oracle for intended meaning.",
+    codeFrom: 7,
+    codeTo: 8
   }
 ];
 
-const viewStates: ViewState[] = [
-  { id: "e0-input-empty", exchange: 0, phase: "input-empty", code: 0 },
-  { id: "e0-input-typing", exchange: 0, phase: "input-typing", code: 0 },
-  { id: "e0-input", exchange: 0, phase: "input", code: 0 },
-  { id: "e0-user", exchange: 0, phase: "user", code: 0 },
-  { id: "e0-typing", exchange: 0, phase: "typing", code: 0 },
-  { id: "e0-complete", exchange: 0, phase: "complete", code: 1 },
-  { id: "e1-input-empty", exchange: 1, phase: "input-empty", code: 1 },
-  { id: "e1-input-typing", exchange: 1, phase: "input-typing", code: 1 },
-  { id: "e1-input", exchange: 1, phase: "input", code: 1 },
-  { id: "e1-user", exchange: 1, phase: "user", code: 1 },
-  { id: "e1-typing", exchange: 1, phase: "typing", code: 1 },
-  { id: "e1-complete", exchange: 1, phase: "complete", code: 2 }
-];
+const phases: Phase[] = ["input-empty", "input-typing", "input", "user", "typing", "complete"];
 
-const completeCursorByExchange = new Map<number, number>([
-  [0, 5],
-  [1, 11]
-]);
+const viewStates: ViewState[] = exchanges.flatMap((exchange, exchangeIndex) =>
+  phases.map((phase) => ({
+    id: `e${exchangeIndex}-${phase}`,
+    exchange: exchangeIndex,
+    phase,
+    code: phase === "complete" ? exchange.codeTo : exchange.codeFrom
+  }))
+);
 
-const inputCursorByExchange = new Map<number, number>([
-  [0, 2],
-  [1, 8]
-]);
+const completeCursorByExchange = new Map<number, number>(
+  exchanges.map((_, index) => [index, index * phases.length + 5])
+);
 
-const inputStartCursorByExchange = new Map<number, number>([
-  [0, 0],
-  [1, 6]
-]);
+const inputCursorByExchange = new Map<number, number>(
+  exchanges.map((_, index) => [index, index * phases.length + 2])
+);
 
-const recoveryCursorByCode = new Map<number, number>([
-  [0, 0],
-  [1, 5],
-  [2, 11]
-]);
+const inputStartCursorByExchange = new Map<number, number>(
+  exchanges.map((_, index) => [index, index * phases.length])
+);
+
+const recoveryCursorByCode = new Map<number, number>(
+  codeStates.map((_, code) => [code, code === 0 ? 0 : code * phases.length - 1])
+);
 
 let cursor = 0;
 let health: Health = { kind: "ok", detail: "ready" };
@@ -180,27 +277,24 @@ function prepareSandbox(): void {
   git(["config", "user.email", "agent-replay@example.invalid"], workspaceDir);
   writeFileSync(path.join(workspaceDir, ".git", "info", "exclude"), ".scenario-replay/\n");
 
-  writeSnapshot(0);
-  git(["add", "."], workspaceDir);
-  git(["commit", "-m", "scenario: base"], workspaceDir);
-  git(["branch", "-f", codeRefs[0]], workspaceDir);
-
-  writeSnapshot(1);
-  git(["add", "."], workspaceDir);
-  git(["commit", "-m", "scenario: add property tests"], workspaceDir);
-  git(["branch", "-f", codeRefs[1]], workspaceDir);
-
-  writeSnapshot(2);
-  git(["add", "."], workspaceDir);
-  git(["commit", "-m", "scenario: fix discount upper bound"], workspaceDir);
-  git(["branch", "-f", codeRefs[2]], workspaceDir);
+  for (let index = 0; index < codeStates.length; index += 1) {
+    writeSnapshot(index);
+    git(["add", "."], workspaceDir);
+    git(["commit", "-m", codeStates[index].commitMessage], workspaceDir);
+    git(["branch", "-f", codeRefs[index]], workspaceDir);
+  }
 
   switchCodeTo(0, { allowForce: true });
   saveState({ cursor: 0, updatedAt: new Date().toISOString() });
 }
 
 function ensureSandboxExists(): void {
-  if (!existsSync(workspaceDir) || !existsSync(ownerFile)) {
+  if (
+    !existsSync(workspaceDir) ||
+    !existsSync(ownerFile) ||
+    !existsSync(path.join(workspaceDir, ".git")) ||
+    codeRefs.some((ref) => !gitSucceeds(["rev-parse", "--verify", ref], workspaceDir))
+  ) {
     prepareSandbox();
   }
 }
@@ -215,22 +309,23 @@ function assertSafeSandboxDelete(): void {
 
 function writeSnapshot(index: number): void {
   rmSync(path.join(workspaceDir, "src"), { recursive: true, force: true });
-  rmSync(path.join(workspaceDir, "test"), { recursive: true, force: true });
+  rmSync(path.join(workspaceDir, "package.json"), { force: true });
   mkdirSync(path.join(workspaceDir, "src"), { recursive: true });
 
   writeFileSync(
     path.join(workspaceDir, "package.json"),
     `${JSON.stringify(
       {
-        name: "discount-demo-workspace",
+        name: "add-adversary-cassette",
         version: "0.0.0",
         private: true,
         type: "module",
         scripts: {
-          test: "vitest run"
+          test: "tsx --test src/add.test.ts"
         },
         devDependencies: {
-          vitest: "^3.2.4"
+          "fast-check": "^4.8.0",
+          tsx: "^4.22.4"
         }
       },
       null,
@@ -238,77 +333,15 @@ function writeSnapshot(index: number): void {
     )}\n`
   );
 
-  if (index === 0) {
-    writeFileSync(
-      path.join(workspaceDir, "src", "discount.ts"),
-      `export function applyDiscount(priceCents: number, percent: number): number {
-  if (!Number.isInteger(priceCents) || priceCents < 0) {
-    throw new RangeError("priceCents must be a non-negative integer");
+  for (const file of sourceFiles) {
+    const target = path.join(workspaceDir, file);
+    mkdirSync(path.dirname(target), { recursive: true });
+    writeFileSync(target, readSourceFileAtRef(codeStates[index].sourceRef, file));
   }
-  if (!Number.isInteger(percent) || percent < 0) {
-    throw new RangeError("percent must be an integer from 0 through 100");
-  }
-
-  return Math.round(priceCents * (1 - percent / 100));
 }
-`
-    );
-    return;
-  }
 
-  mkdirSync(path.join(workspaceDir, "test"), { recursive: true });
-  writeFileSync(
-    path.join(workspaceDir, "test", "discount.property.test.ts"),
-    `import { describe, expect, it } from "vitest";
-import { applyDiscount } from "../src/discount";
-
-describe("applyDiscount", () => {
-  it("valid discounts keep prices between zero and the original price", () => {
-    for (let priceCents = 0; priceCents <= 25_000; priceCents += 137) {
-      for (let percent = 0; percent <= 100; percent += 1) {
-        const result = applyDiscount(priceCents, percent);
-
-        expect(Number.isInteger(result)).toBe(true);
-        expect(result).toBeGreaterThanOrEqual(0);
-        expect(result).toBeLessThanOrEqual(priceCents);
-      }
-    }
-  });
-
-  it("zero percent returns the original price", () => {
-    for (let priceCents = 0; priceCents <= 25_000; priceCents += 331) {
-      expect(applyDiscount(priceCents, 0)).toBe(priceCents);
-    }
-  });
-
-  it("rejects percentages outside the accepted domain", () => {
-    for (const percent of [-10, -1, 101, 150]) {
-      expect(() => applyDiscount(5_000, percent)).toThrow(RangeError);
-    }
-  });
-});
-`
-  );
-
-  const percentGuard =
-    index === 1
-      ? "!Number.isInteger(percent) || percent < 0"
-      : "!Number.isInteger(percent) || percent < 0 || percent > 100";
-
-  writeFileSync(
-    path.join(workspaceDir, "src", "discount.ts"),
-    `export function applyDiscount(priceCents: number, percent: number): number {
-  if (!Number.isInteger(priceCents) || priceCents < 0) {
-    throw new RangeError("priceCents must be a non-negative integer");
-  }
-  if (${percentGuard}) {
-    throw new RangeError("percent must be an integer from 0 through 100");
-  }
-
-  return Math.round(priceCents * (1 - percent / 100));
-}
-`
-  );
+function readSourceFileAtRef(ref: string, file: string): string {
+  return gitRawOutput(["show", `${ref}:${file}`], sourceRepoDir);
 }
 
 function acquireLock(): void {
@@ -898,6 +931,14 @@ function git(args: string[], cwd: string): void {
     const output = `${result.stderr}\n${result.stdout}`.trim();
     throw new Error(`git ${args.join(" ")} failed${output ? `\n${output}` : ""}`);
   }
+}
+
+function gitSucceeds(args: string[], cwd: string): boolean {
+  const result = spawnSync("git", args, {
+    cwd,
+    encoding: "utf8"
+  });
+  return result.status === 0;
 }
 
 function gitOutput(args: string[], cwd: string): string {
