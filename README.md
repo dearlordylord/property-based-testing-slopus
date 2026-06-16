@@ -1,3 +1,17 @@
+https://www.youtube.com/watch?v=IYzDFHx6QPY - The lazy programmer's guide to writing thousands of tests - Scott Wlaschin
+
+https://fsharpforfunandprofit.com/posts/property-based-testing/
+
+https://fsharpforfunandprofit.com/posts/property-based-testing-2/
+
+https://jonas-chapuis.medium.com/property-based-testing-803e63065033
+
+https://github.com/dubzzz/fast-check
+
+
+
+
+
 # Agent Scenario Replay
 
 Deterministic OpenTUI replay for a tech talk where the audience sees an
