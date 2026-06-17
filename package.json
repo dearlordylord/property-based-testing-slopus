@@ -10,9 +10,10 @@
     "tui:prepare": "npm --prefix opentui-agent-replay run demo:prepare",
     "tui:status": "npm --prefix opentui-agent-replay run status",
     "tui:validate": "npm --prefix opentui-agent-replay run validate",
-    "test": "tsx --test src/add.test.ts"
+    "test": "npm run tui:prepare && npm --prefix opentui-agent-replay/sandbox/workspace test"
   },
   "devDependencies": {
+    "@types/node": "^25.9.3",
     "fast-check": "^4.8.0",
     "tsx": "^4.22.4"
   }

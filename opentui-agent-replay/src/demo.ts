@@ -13,6 +13,7 @@ import {
   mkdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync
 } from "node:fs";
 import path from "node:path";
@@ -45,6 +46,7 @@ type CodeState = {
   sourceRef?: string;
   fileRefs?: Record<string, string>;
   fileContents?: Record<string, string>;
+  deletedFiles?: string[];
   commitMessage: string;
 };
 
@@ -87,6 +89,8 @@ const sourceFiles = [
   "src/sort.test.ts",
   "src/query.ts",
   "src/query.test.ts",
+  "src/activeRooms.ts",
+  "src/activeRooms.test.ts",
 ];
 
 type TestSnippet = {
@@ -122,7 +126,7 @@ const makeAddTestSource = (snippets: TestSnippet[]) => {
   const usesFastCheck = snippets.some((snippet) => snippet.needsFastCheck);
   const imports = [
     `import { describe, it } from "node:test";`,
-    `import assert from "node:assert/strict";`,
+    `import { strict as assert } from "assert";`,
   ];
 
   if (usesFastCheck) {
@@ -156,7 +160,7 @@ const makeAddTestSourceWithCommentedExamples = (
   const usesFastCheck = activeSnippets.some((snippet) => snippet.needsFastCheck);
   const imports = [
     `import { describe, it } from "node:test";`,
-    `import assert from "node:assert/strict";`,
+    `import { strict as assert } from "assert";`,
   ];
 
   if (usesFastCheck) {
@@ -198,6 +202,10 @@ const exampleThreePlusFive = testSnippet(
 const exampleTwentySevenPlusFifteen = testSnippet(
   "returns 42 for 27+15",
   `assert.equal(add(27, 15), 42);`
+);
+const initialThrowExample = testSnippet(
+  "throws while add is not implemented",
+  `assert.throws(() => add(1, 2), /Not implemented/);`
 );
 const randomAdditionOracle = testSnippet(
   "matches numeric addition for random integers",
@@ -318,7 +326,15 @@ const doublingByOneTestSource = makeAddTestSourceWithCommentedExamples(
   expandedExampleTests,
   doublingByOneTests
 );
+const throwOnlyTestSource = makeAddTestSource([initialThrowExample]);
 const propertyOnlyTestSource = makeAddTestSource(propertyOnlyTests);
+
+const throwOnlyAddSource = `export function add(a: number, b: number): number {
+  throw new Error("Not implemented");
+}
+
+export default add;
+`;
 
 const returnFourAddSource = `export function add(a: number, b: number): number {
   return 4;
@@ -393,7 +409,7 @@ export default sortNumbers;
 `;
 
 const sortTestSource = `import { describe, it } from "node:test";
-import assert from "node:assert/strict";
+import { strict as assert } from "assert";
 import fc from "fast-check";
 
 import { sortNumbers } from "./sort.js";
@@ -462,7 +478,7 @@ export function parseQuery(query: string): Record<string, string> {
 `;
 
 const queryTestSource = `import { describe, it } from "node:test";
-import assert from "node:assert/strict";
+import { strict as assert } from "assert";
 import fc from "fast-check";
 
 import { buildQuery, parseQuery } from "./query.js";
@@ -482,6 +498,135 @@ describe("query strings", () => {
 });
 `;
 
+const activeRoomsSource = `export type RoomEvent =
+  | { type: "join"; room: string; user: string }
+  | { type: "leave"; room: string; user: string }
+  | { type: "online"; user: string }
+  | { type: "offline"; user: string };
+
+export type RoomState = {
+  joined: Map<string, Set<string>>;
+  online: Set<string>;
+};
+
+export const emptyRoomState = (): RoomState => ({
+  joined: new Map(),
+  online: new Set(),
+});
+
+export function applyRoomEvent(state: RoomState, event: RoomEvent): RoomState {
+  const joined = new Map([...state.joined].map(([room, users]) => [room, new Set(users)]));
+  const online = new Set(state.online);
+
+  if (event.type === "join") {
+    joined.set(event.room, new Set([...(joined.get(event.room) ?? []), event.user]));
+  }
+
+  if (event.type === "leave") {
+    joined.get(event.room)?.delete(event.user);
+  }
+
+  if (event.type === "online") {
+    online.add(event.user);
+  }
+
+  if (event.type === "offline") {
+    online.delete(event.user);
+  }
+
+  return { joined, online };
+}
+
+export function getActiveRooms(state: RoomState): string[] {
+  const active: string[] = [];
+
+  for (const [room, users] of state.joined) {
+    if ([...users].some((user) => state.online.has(user))) {
+      active.push(room);
+    }
+  }
+
+  return active.sort();
+}
+`;
+
+const activeRoomsTestSource = `import { describe, it } from "node:test";
+import { strict as assert } from "assert";
+import fc from "fast-check";
+
+import { applyRoomEvent, emptyRoomState, getActiveRooms, type RoomEvent } from "./activeRooms.js";
+
+const id = fc.stringMatching(/^[a-z][a-z0-9]{0,8}$/);
+
+const eventHistory = fc
+  .record({
+    rooms: fc.uniqueArray(id, { minLength: 1, maxLength: 4 }),
+    users: fc.uniqueArray(id, { minLength: 1, maxLength: 4 }),
+  })
+  .chain(({ rooms, users }) =>
+    fc.array(
+      fc.oneof(
+        fc.record({
+          type: fc.constant("join" as const),
+          room: fc.constantFrom(...rooms),
+          user: fc.constantFrom(...users),
+        }),
+        fc.record({
+          type: fc.constant("leave" as const),
+          room: fc.constantFrom(...rooms),
+          user: fc.constantFrom(...users),
+        }),
+        fc.record({
+          type: fc.constant("online" as const),
+          user: fc.constantFrom(...users),
+        }),
+        fc.record({
+          type: fc.constant("offline" as const),
+          user: fc.constantFrom(...users),
+        })
+      ),
+      { maxLength: 30 }
+    )
+  );
+
+function expectedActiveRooms(events: RoomEvent[]): string[] {
+  const joined = new Map<string, Set<string>>();
+  const online = new Set<string>();
+
+  for (const event of events) {
+    if (event.type === "join") {
+      joined.set(event.room, new Set([...(joined.get(event.room) ?? []), event.user]));
+    }
+    if (event.type === "leave") {
+      joined.get(event.room)?.delete(event.user);
+    }
+    if (event.type === "online") {
+      online.add(event.user);
+    }
+    if (event.type === "offline") {
+      online.delete(event.user);
+    }
+  }
+
+  return [...joined]
+    .filter(([, users]) => [...users].some((user) => online.has(user)))
+    .map(([room]) => room)
+    .sort();
+}
+
+describe("active rooms", () => {
+  it("matches the simple model for generated event histories", () => {
+    fc.assert(
+      fc.property(eventHistory, (events) => {
+        const state = events.reduce(applyRoomEvent, emptyRoomState());
+
+        assert.deepEqual(getActiveRooms(state), expectedActiveRooms(events));
+      })
+    );
+  });
+});
+`;
+
 const codeStates: CodeState[] = [
   {
     id: "empty",
@@ -490,6 +635,10 @@ const codeStates: CodeState[] = [
   {
     id: "throw-only",
     sourceRef: "08e2cfe",
+    fileContents: {
+      "src/add.ts": throwOnlyAddSource,
+      "src/add.test.ts": throwOnlyTestSource,
+    },
     commitMessage: "Agent adds throwing implementation and throw test",
   },
   {
@@ -648,25 +797,37 @@ const codeStates: CodeState[] = [
     id: "sort-properties",
     sourceRef: "08e2cfe",
     fileContents: {
-      "src/add.ts": finalAdditionAddSource,
-      "src/add.test.ts": propertyOnlyTestSource,
       "src/sort.ts": sortSource,
       "src/sort.test.ts": sortTestSource,
     },
+    deletedFiles: ["src/add.ts", "src/add.test.ts"],
     commitMessage: "User adds sort properties",
   },
   {
     id: "query-roundtrip",
     sourceRef: "08e2cfe",
     fileContents: {
-      "src/add.ts": finalAdditionAddSource,
-      "src/add.test.ts": propertyOnlyTestSource,
       "src/sort.ts": sortSource,
       "src/sort.test.ts": sortTestSource,
       "src/query.ts": querySource,
       "src/query.test.ts": queryTestSource,
     },
+    deletedFiles: ["src/add.ts", "src/add.test.ts"],
     commitMessage: "User adds query round-trip property",
+  },
+  {
+    id: "active-room-model",
+    sourceRef: "08e2cfe",
+    fileContents: {
+      "src/sort.ts": sortSource,
+      "src/sort.test.ts": sortTestSource,
+      "src/query.ts": querySource,
+      "src/query.test.ts": queryTestSource,
+      "src/activeRooms.ts": activeRoomsSource,
+      "src/activeRooms.test.ts": activeRoomsTestSource,
+    },
+    deletedFiles: ["src/add.ts", "src/add.test.ts"],
+    commitMessage: "Add active room model example",
   },
 ];
 
@@ -827,8 +988,9 @@ const exchanges: Exchange[] = [
     codeFrom: 18,
     codeTo: 19,
     codeSteps: [19],
+    hiddenDiffFiles: ["src/add.ts", "src/add.test.ts"],
     lawCard: {
-      title: "Real case: sort",
+      title: "sort",
       formula: "ordered + same bag",
       art: [
         "ORDERED",
@@ -849,7 +1011,23 @@ const exchanges: Exchange[] = [
     codeFrom: 19,
     codeTo: 20,
     codeSteps: [20],
-    hiddenDiffFiles: ["src/query.ts"],
+    hiddenDiffFiles: ["src/query.ts", "src/query.test.ts"],
+    lawCard: {
+      title: "Example: serialize + parse",
+      formula: "parse(build(params)) = params",
+      art: [
+        "src/query.ts",
+        "src/query.test.ts",
+        "",
+        "params = { page: '1', q: 'cats' }",
+        "",
+        "build(params)",
+        "        = 'page=1&q=cats'",
+        "",
+        "parse(build(params))",
+        "        = params",
+      ],
+    },
   },
   {
     id: "idempotency-examples",
@@ -868,6 +1046,53 @@ const exchanges: Exchange[] = [
         "escape(escape(s))     = escape(s)",
         "sort(sort(xs))        = sort(xs)",
         "dedupe(dedupe(xs))    = dedupe(xs)",
+      ],
+    },
+  },
+  {
+    id: "slug-idempotency-example",
+    user: "",
+    assistant: "",
+    codeFrom: 20,
+    codeTo: 20,
+    preAgentCodeSteps: [20],
+    silent: true,
+    lawCard: {
+      title: "Example: formatter",
+      formula: "slugify(slugify(title)) = slugify(title)",
+      art: [
+        "slugify('  Hello   World!  ')",
+        "        = 'hello-world'",
+        "",
+        "slugify('hello-world')",
+        "        = 'hello-world'",
+      ],
+    },
+  },
+  {
+    id: "chat-model-example",
+    user: "",
+    assistant: "",
+    codeFrom: 20,
+    codeTo: 21,
+    preAgentCodeSteps: [21],
+    hiddenDiffFiles: ["src/activeRooms.ts", "src/activeRooms.test.ts"],
+    silent: true,
+    lawCard: {
+      title: "Example: event history",
+      formula: "realState(events) = modelState(events)",
+      art: [
+        "src/activeRooms.ts",
+        "src/activeRooms.test.ts",
+        "",
+        "events:",
+        "  join(room, user)",
+        "  online(user)",
+        "  leave(room, user)",
+        "  offline(user)",
+        "",
+        "active rooms from reducer",
+        "        = active rooms from simple model",
       ],
     },
   },
@@ -987,9 +1212,7 @@ function buildRecoveryCursorByCode(): Map<number, number> {
   const map = new Map<number, number>();
   for (let index = 0; index < viewStates.length; index += 1) {
     const code = viewStates[index].code;
-    if (!map.has(code)) {
-      map.set(code, index);
-    }
+    map.set(code, index);
   }
   return map;
 }
@@ -1050,6 +1273,8 @@ function main(): void {
 }
 
 function prepareSandbox(): void {
+  const nextCursor = cursorToPreserveForPrepare();
+
   assertSafeSandboxDelete();
   rmSync(sandboxDir, { recursive: true, force: true });
   mkdirSync(workspaceDir, { recursive: true });
@@ -1058,7 +1283,8 @@ function prepareSandbox(): void {
   git(["init"], workspaceDir);
   git(["config", "user.name", "Agent Replay"], workspaceDir);
   git(["config", "user.email", "agent-replay@example.invalid"], workspaceDir);
-  writeFileSync(path.join(workspaceDir, ".git", "info", "exclude"), ".scenario-replay/\n");
+  writeFileSync(path.join(workspaceDir, ".git", "info", "exclude"), ".scenario-replay/\nnode_modules/\n");
+  ensureWorkspaceNodeModulesLink();
 
   for (let index = 0; index < codeStates.length; index += 1) {
     writeSnapshot(index);
@@ -1067,8 +1293,50 @@ function prepareSandbox(): void {
     git(["branch", "-f", codeRefs[index]], workspaceDir);
   }
 
-  switchCodeTo(0, { allowForce: true });
-  saveState({ cursor: 0, updatedAt: new Date().toISOString() });
+  switchCodeTo(viewStates[nextCursor].code, { allowForce: true });
+  saveState({ cursor: nextCursor, updatedAt: new Date().toISOString() });
+}
+
+function cursorToPreserveForPrepare(): number {
+  const saved = readPersistedState();
+  const savedCursor = saved ? clampCursor(saved.cursor) : 0;
+
+  if (!existsSync(path.join(workspaceDir, ".git"))) {
+    return savedCursor;
+  }
+
+  if (isWorkspaceDirty()) {
+    return savedCursor;
+  }
+
+  try {
+    const head = gitOutput(["rev-parse", "HEAD"], workspaceDir);
+    const knownCode = codeRefs.findIndex((ref) => refCommit(ref) === head);
+    const recoveryCursor = recoveryCursorByCode.get(knownCode);
+    return recoveryCursor ?? savedCursor;
+  } catch {
+    return savedCursor;
+  }
+}
+
+function readPersistedState(): PersistedState | undefined {
+  if (!existsSync(stateFile)) {
+    return undefined;
+  }
+
+  try {
+    const value = JSON.parse(readFileSync(stateFile, "utf8")) as Partial<PersistedState>;
+    if (typeof value.cursor !== "number") {
+      return undefined;
+    }
+
+    return {
+      cursor: value.cursor,
+      updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : new Date(0).toISOString(),
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 function ensureSandboxExists(): void {
@@ -1095,10 +1363,23 @@ function assertSafeSandboxDelete(): void {
   }
 }
 
+function ensureWorkspaceNodeModulesLink(): void {
+  const rootNodeModules = path.join(sourceRepoDir, "node_modules");
+  const workspaceNodeModules = path.join(workspaceDir, "node_modules");
+
+  if (existsSync(workspaceNodeModules) || !existsSync(rootNodeModules)) {
+    return;
+  }
+
+  symlinkSync(rootNodeModules, workspaceNodeModules, "dir");
+}
+
 function writeSnapshot(index: number): void {
   rmSync(path.join(workspaceDir, "src"), { recursive: true, force: true });
   rmSync(path.join(workspaceDir, "package.json"), { force: true });
+  rmSync(path.join(workspaceDir, "tsconfig.json"), { force: true });
   mkdirSync(path.join(workspaceDir, "src"), { recursive: true });
+  ensureWorkspaceNodeModulesLink();
 
   writeFileSync(
     path.join(workspaceDir, "package.json"),
@@ -1112,9 +1393,29 @@ function writeSnapshot(index: number): void {
           test: "tsx --test src/*.test.ts"
         },
         devDependencies: {
+          "@types/node": "^24.10.1",
           "fast-check": "^4.8.0",
           tsx: "^4.22.4"
         }
+      },
+      null,
+      2
+    )}\n`
+  );
+
+  writeFileSync(
+    path.join(workspaceDir, "tsconfig.json"),
+    `${JSON.stringify(
+      {
+        compilerOptions: {
+          target: "ES2022",
+          module: "NodeNext",
+          moduleResolution: "NodeNext",
+          types: ["node"],
+          strict: true,
+          skipLibCheck: true
+        },
+        include: ["src/**/*.ts"]
       },
       null,
       2
@@ -1136,6 +1437,10 @@ function writeSnapshot(index: number): void {
 
     mkdirSync(path.dirname(target), { recursive: true });
     writeFileSync(target, explicitContent ?? readSourceFileAtRef(fileRef, file));
+  }
+
+  for (const file of codeStates[index].deletedFiles ?? []) {
+    rmSync(path.join(workspaceDir, file), { force: true });
   }
 }
 
@@ -1599,11 +1904,9 @@ async function runTui(): Promise<void> {
           jumpToInputTyping(cursor + 2);
           return;
         }
-        if (nextState.phase === "complete" && nextState.exchange === state.exchange) {
-          if (!moveCode(nextState.code)) {
-            render();
-            return;
-          }
+        if (nextState.code !== state.code && !moveCode(nextState.code)) {
+          render();
+          return;
         }
         enterState(cursor + 1);
       }
@@ -1624,71 +1927,25 @@ async function runTui(): Promise<void> {
   };
 
   const backward = (): void => {
-    const state = viewStates[cursor];
-
-    if (state.phase === "input-empty") {
-      if (state.exchange > 0) {
-        const previousComplete = finalCompleteCursorByExchange.get(state.exchange - 1);
-        if (previousComplete !== undefined) {
-          if (!moveCode(viewStates[previousComplete].code)) {
-            render();
-            return;
-          }
-          enterState(previousComplete);
-        }
-      }
+    const previousCursor = previousCursorFor(cursor);
+    if (previousCursor === undefined) {
       return;
     }
 
-    if (state.phase === "input-typing" || state.phase === "input") {
-      const inputStartCursor = inputStartCursorByExchange.get(state.exchange);
-      if (inputStartCursor !== undefined) {
-        enterState(inputStartCursor);
-      }
-      return;
-    }
-
-    if (state.phase === "complete") {
-      const previousState = viewStates[cursor - 1];
-      if (previousState?.phase === "complete" && previousState.exchange === state.exchange) {
-        if (!moveCode(previousState.code)) {
-          render();
-          return;
-        }
-        enterState(cursor - 1);
-        return;
-      }
-    }
-
-    const previousState = viewStates[cursor - 1];
-    if (previousState?.phase === "complete" && exchanges[previousState.exchange].silent) {
-      if (!moveCode(previousState.code)) {
-        render();
-        return;
-      }
-      enterState(cursor - 1);
-      return;
-    }
-
-    const inputCursor = inputCursorByExchange.get(state.exchange);
-    if (inputCursor === undefined) {
-      return;
-    }
-
-    const inputState = viewStates[inputCursor];
-    if (!moveCode(inputState.code)) {
+    const previousState = viewStates[previousCursor];
+    if (!moveCode(previousState.code)) {
       render();
       return;
     }
 
-    enterState(inputCursor);
+    enterState(previousCursor);
   };
 
   const resetSandboxFromUi = (): void => {
     prepareSandbox();
     health = { kind: "ok", detail: "sandbox rebuilt from scenario refs" };
     codeMoveBlocked = false;
-    cursor = 0;
+    cursor = clampCursor(readPersistedState()?.cursor ?? cursor);
     typingChars = 0;
     render();
   };
@@ -1721,7 +1978,7 @@ async function runTui(): Promise<void> {
 function buildHeader(state: ViewState): string {
   const codeRef = codeRefs[state.code];
   const phase = state.phase.padEnd(8, " ");
-  const step = `${String(cursor).padStart(2, "0")}/${viewStates.length - 1}`;
+  const step = `${String(cursor + 1).padStart(2, "0")}/${viewStates.length}`;
   const exchangeId = exchanges[state.exchange].id;
   const healthText = `${health.kind}: ${health.detail}`;
   return [
@@ -1774,6 +2031,42 @@ function buildInput(state: ViewState): string {
     return userText;
   }
   return "";
+}
+
+function previousCursorFor(currentCursor: number): number | undefined {
+  const state = viewStates[currentCursor];
+  if (!state || currentCursor <= 0) {
+    return undefined;
+  }
+
+  if (exchanges[state.exchange].silent) {
+    return currentCursor - 1;
+  }
+
+  if (state.phase === "input-empty") {
+    if (state.exchange === 0) {
+      return undefined;
+    }
+
+    return finalCompleteCursorByExchange.get(state.exchange - 1);
+  }
+
+  if (state.phase === "input-typing" || state.phase === "input") {
+    return inputStartCursorByExchange.get(state.exchange);
+  }
+
+  if (state.phase === "complete") {
+    const previousState = viewStates[currentCursor - 1];
+    if (previousState?.phase === "complete" && previousState.exchange === state.exchange) {
+      return currentCursor - 1;
+    }
+
+    if (previousState?.phase === "complete" && exchanges[previousState.exchange].silent) {
+      return currentCursor - 1;
+    }
+  }
+
+  return inputCursorByExchange.get(state.exchange);
 }
 
 function formatMessage(role: string, text: string): string {
@@ -2018,10 +2311,13 @@ function validateCassetteContract(): void {
   validateMoreExamplesSplitContract();
   validateSortExampleContract();
   validateQueryRoundtripContract();
+  validateChatModelExampleContract();
   validateUserOwnedTestContracts();
   validateHiddenDiffContracts();
   validateSilentNavigationContract();
+  validateBackwardNavigationContract();
   validateLawCardContract();
+  validateFinalStateContract();
 
   for (const [exchangeIndex, completeCursor] of finalCompleteCursorByExchange.entries()) {
     if (exchangeIndex >= exchanges.length - 1) {
@@ -2106,6 +2402,19 @@ function validateSilentNavigationContract(): void {
   }
 }
 
+function validateBackwardNavigationContract(): void {
+  for (let index = 1; index < viewStates.length; index += 1) {
+    const previousCursor = previousCursorFor(index);
+    if (previousCursor === undefined) {
+      throw new Error(`Cassette contract failed: cursor ${index} has no Back target`);
+    }
+
+    if (previousCursor >= index) {
+      throw new Error(`Cassette contract failed: cursor ${index} Back target does not move backward`);
+    }
+  }
+}
+
 function validateLawCardContract(): void {
   const expectedCards = [
     { id: "swapped-inputs", formula: "same answer after swapping inputs" },
@@ -2113,7 +2422,10 @@ function validateLawCardContract(): void {
     { id: "zero-case", formula: "X + 0 = X" },
     { id: "laws-summary", formula: "commutativity + associativity + identity" },
     { id: "sort-example", formula: "ordered + same bag" },
+    { id: "query-roundtrip", formula: "parse(build(params)) = params" },
     { id: "idempotency-examples", formula: "f(f(x)) = f(x)" },
+    { id: "slug-idempotency-example", formula: "slugify(slugify(title)) = slugify(title)" },
+    { id: "chat-model-example", formula: "realState(events) = modelState(events)" },
   ];
 
   for (const expected of expectedCards) {
@@ -2131,6 +2443,23 @@ function validateLawCardContract(): void {
     if (!card || card.formula !== expected.formula || card.art.length === 0) {
       throw new Error(`Cassette contract failed: ${expected.id} law card is missing or incomplete`);
     }
+  }
+}
+
+function validateFinalStateContract(): void {
+  const finalState = viewStates.at(-1);
+  if (!finalState) {
+    throw new Error("Cassette contract failed: no final state exists");
+  }
+
+  const finalExchange = exchanges[finalState.exchange];
+  if (
+    finalState.id !== "chat-model-example-diff" ||
+    finalExchange.id !== "chat-model-example" ||
+    finalState.code !== 21 ||
+    finalState.phase !== "complete"
+  ) {
+    throw new Error("Cassette contract failed: final reachable state must be the chat model example");
   }
 }
 
@@ -2251,31 +2580,75 @@ function validateQueryRoundtripContract(): void {
     throw new Error("Cassette contract failed: query-roundtrip completion state is missing");
   }
 
-  if (lawCardForState(viewStates[completeCursor])) {
-    throw new Error("Cassette contract failed: query-roundtrip must be a code diff, not a banner");
+  const card = lawCardForState(viewStates[completeCursor]);
+  if (!card || card.formula !== "parse(build(params)) = params") {
+    throw new Error("Cassette contract failed: query-roundtrip must render as a card-only example");
   }
 
   const renderedSlots = renderedDiffSlotsForState(viewStates[completeCursor]);
-  if (renderedSlots.some((slot) => slot.file === "src/query.ts")) {
-    throw new Error("Cassette contract failed: query-roundtrip must hide src/query.ts");
-  }
-
-  if (renderedSlots.length !== 1 || renderedSlots[0].file !== "src/query.test.ts") {
-    throw new Error("Cassette contract failed: query-roundtrip must render only src/query.test.ts");
+  if (renderedSlots.length !== 0) {
+    throw new Error("Cassette contract failed: query-roundtrip must hide query diffs");
   }
 
   const actualDiffs = diffByFileForExchange(exchanges[exchangeIndex], viewStates[completeCursor].visibleCodeSteps);
-  if (!actualDiffs.has("src/query.ts")) {
-    throw new Error("Cassette contract failed: query-roundtrip hidden source file is missing");
+  if (!actualDiffs.has("src/query.ts") || !actualDiffs.has("src/query.test.ts")) {
+    throw new Error("Cassette contract failed: query-roundtrip hidden source or test file is missing");
   }
 
-  const renderedDiff = renderedSlots.map((slot) => slot.diff).join("\n");
+  const renderedDiff = [...actualDiffs.values()].join("\n");
   if (
     !renderedDiff.includes(".dictionary(fc.string(), fc.string())") ||
     !renderedDiff.includes("fc.property(queryParams, (params)") ||
     !renderedDiff.includes("parseQuery(buildQuery(params))")
   ) {
     throw new Error("Cassette contract failed: query-roundtrip diff is missing the round-trip property");
+  }
+}
+
+function validateChatModelExampleContract(): void {
+  const exchangeIndex = exchanges.findIndex((exchange) => exchange.id === "chat-model-example");
+  if (exchangeIndex < 0) {
+    throw new Error("Cassette contract failed: chat-model-example exchange is missing");
+  }
+
+  const completeCursor = finalCompleteCursorByExchange.get(exchangeIndex);
+  if (completeCursor === undefined) {
+    throw new Error("Cassette contract failed: chat-model-example completion state is missing");
+  }
+
+  const state = viewStates[completeCursor];
+  if (state.code !== 21) {
+    throw new Error("Cassette contract failed: chat-model-example must move workspace to active-room code state");
+  }
+
+  const card = lawCardForState(state);
+  if (
+    !card ||
+    card.formula !== "realState(events) = modelState(events)" ||
+    !card.art.includes("src/activeRooms.ts") ||
+    !card.art.includes("src/activeRooms.test.ts") ||
+    !card.art.includes("  offline(user)")
+  ) {
+    throw new Error("Cassette contract failed: chat-model-example card is missing active-room details");
+  }
+
+  const renderedSlots = renderedDiffSlotsForState(state);
+  if (renderedSlots.length !== 0) {
+    throw new Error("Cassette contract failed: chat-model-example must hide active-room diffs");
+  }
+
+  const actualDiffs = diffByFileForExchange(exchanges[exchangeIndex], state.visibleCodeSteps);
+  if (!actualDiffs.has("src/activeRooms.ts") || !actualDiffs.has("src/activeRooms.test.ts")) {
+    throw new Error("Cassette contract failed: chat-model-example hidden source or test file is missing");
+  }
+
+  const hiddenDiff = [...actualDiffs.values()].join("\n");
+  if (
+    !hiddenDiff.includes("getActiveRooms") ||
+    !hiddenDiff.includes("expectedActiveRooms") ||
+    !hiddenDiff.includes("fc.property(eventHistory")
+  ) {
+    throw new Error("Cassette contract failed: chat-model-example hidden property test is missing");
   }
 }
 
